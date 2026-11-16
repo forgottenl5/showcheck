@@ -1,0 +1,6 @@
+C1    PASS     origin 0.00 m, heading +0.00 deg, 0 drone(s) off-pad
+C2    PASS     south crowd: 60.0 m (buffer 50)
+C3    PASS     fence match 0.0 m, min margin 40.0 m, max alt 30.0 m
+C4    PASS     max speed 4.20 m/s [10 Hz 4.20], max accel 1.88 m/s2 [10 Hz 1.83], max join jump 0.00 m/s
+C5    PASS     2.51 m (drone_013/drone_014 @ 28.9 s)
+C6    PASS     100 drones fingerprinted, show 7c0461fc05b7b3e3...
