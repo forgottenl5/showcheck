@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 forgottenl5
 """Venue file (ShowCheck's own JSON format, see venue_format.md)."""
-import json
 import numpy as np
+from .limits import load_json_file
 
 DEFAULT_TOL = {"origin_m": 2.0, "heading_deg": 2.0, "pad_m": 1.0, "fence_match_m": 1.0}
 
@@ -15,7 +15,7 @@ def _poly(pts, what):
 
 
 def load_venue(path_or_dict) -> dict:
-    v = path_or_dict if isinstance(path_or_dict, dict) else json.load(open(path_or_dict, encoding="utf-8"))
+    v = path_or_dict if isinstance(path_or_dict, dict) else load_json_file(path_or_dict)
     o = v["origin"]
     out = {"name": v.get("name", ""),
            "origin": (float(o["lat"]), float(o["lon"]), float(o.get("alt", 0.0))),

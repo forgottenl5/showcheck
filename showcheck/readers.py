@@ -4,10 +4,9 @@
 
 Written from FORMAT_NOTES.md; .skyc axes, origin and time conventions confirmed by a real Skybrush Studio export.
 """
-import json
-import zipfile
 import numpy as np
 from .model import Drone, Show
+from .limits import LIMITS, SafeZip, LimitError, load_json_file, check_count, check_show, need, finite
 
 
 # ---------------------------------------------------------------- .skyc
@@ -28,6 +27,10 @@ def _trajectory_fn(points, shift):
     T = np.array([float(p[0]) for p in points]) + shift
     P = np.array([p[1] for p in points], float)
     C = [np.array(p[2], float).reshape(-1, 3) if len(p) > 2 and p[2] else np.zeros((0, 3)) for p in points]
+    if P.ndim != 2 or P.shape[1] != 3:
+        raise LimitError("trajectory points must be [time, [x, y, z], control points]")
+    if not (np.all(np.isfinite(T)) and np.all(np.isfinite(P)) and all(np.all(np.isfinite(c)) for c in C)):
+        raise LimitError("trajectory has non-finite times or coordinates")
     if np.any(np.diff(T) < 0):
         raise ValueError("trajectory times are not increasing")
 
@@ -48,16 +51,23 @@ def _trajectory_fn(points, shift):
 
 
 def _resolve(z, obj):
-    """Follow a {"$ref": "./drones/x/trajectory.json#"} link inside the ZIP."""
+    """Follow a {"$ref": "./drones/x/trajectory.json#"} link inside the ZIP (never outside it)."""
     if isinstance(obj, dict) and "$ref" in obj:
-        name = obj["$ref"].split("#")[0].lstrip("./").replace("\\", "/")
-        return json.loads(z.read(name))
+        return z.json(z.ref(obj["$ref"]))
     return obj
 
 
-def read_skyc(path) -> Show:
-    with zipfile.ZipFile(path) as z:
-        spec = json.loads(z.read("show.json"))
+def _light_length(lights):
+    """Decoded bytecode bytes of a {version, data: "<base64>"} light program."""
+    data = lights.get("data") if isinstance(lights, dict) else None
+    return len(data) * 3 // 4 if isinstance(data, str) else 0
+
+
+def read_skyc(path, limits=None) -> Show:
+    lim = LIMITS if limits is None else limits
+    with SafeZip(path, lim) as z:
+        spec = z.json("show.json")
+        need(isinstance(spec, dict), "show.json is not a JSON object")
         if spec.get("version") != 1:
             raise ValueError(f"unsupported .skyc show.json version {spec.get('version')!r}")
         notes = []
@@ -104,17 +114,26 @@ def read_skyc(path) -> Show:
                                                     ("maxVelocityZUp", "max_speed_z_up"), ("minDistance", "min_spacing_m"),
                                                     ("maxAltitude", "max_altitude_m")] if val.get(k1) is not None}
 
-        drones, shifted = [], False
-        for i, d in enumerate(spec["swarm"]["drones"]):
+        drones, shifted, total_points = [], False, 0
+        swarm = spec["swarm"]["drones"]
+        need(isinstance(swarm, list), "swarm.drones is not a list")
+        check_count(len(swarm), "max_drones", "drones in the show", lim)
+        for i, d in enumerate(swarm):
             s = d.get("settings", {})
             traj = _resolve(z, s["trajectory"])
+            need(isinstance(traj, dict) and isinstance(traj.get("points"), list) and len(traj["points"]) > 0,
+                 f"drone {i}: trajectory has no points list")
             if traj.get("version", 1) != 1:
                 raise ValueError(f"drone {i}: unsupported trajectory version {traj.get('version')!r}")
-            shift = float(traj.get("takeoffTime") or 0.0)
+            check_count(len(traj["points"]) - 1, "max_segments", f"drone {i}: trajectory segments", lim)
+            total_points += len(traj["points"])
+            check_count(total_points, "max_points", "trajectory points in the show", lim)
+            shift = finite(traj.get("takeoffTime") or 0.0, f"drone {i}: takeoffTime")
             shifted |= shift != 0
             at, ts, te, segs = _trajectory_fn(traj["points"], shift)
             home = np.array(s["home"], float) if s.get("home") else at(np.array([ts]))[0]
             raw = {"trajectory": traj, "lights": _resolve(z, s.get("lights"))}
+            check_count(_light_length(raw["lights"]), "max_light_length", f"drone {i}: light program bytes", lim)
             if s.get("pyro") is not None:
                 raw["pyro"] = _resolve(z, s["pyro"])
             drones.append(Drone(str(s.get("name", i)), home, at, ts, te,
@@ -122,25 +141,39 @@ def read_skyc(path) -> Show:
         if shifted:
             notes.append("trajectory times shifted by takeoffTime (show time = t + takeoffTime) [confirmed by real export].")
         notes.append("trajectories evaluated exactly from the Bezier segments, sampled at 10 Hz.")
-    return Show(str(path), "skyc", "flight", drones, origin, heading, handed, fence, limits, notes)
+    show = Show(str(path), "skyc", "flight", drones, origin, heading, handed, fence, limits, notes)
+    check_show(show, lim)
+    return show
 
 
 # ---------------------------------------------------------------- .vviz
-def read_vviz(path) -> Show:
-    with open(path, encoding="utf-8-sig") as f:
-        spec = json.load(f)
-    rate = float(spec.get("defaultPositionRate", 1.0))
-    off = float(spec.get("timeOffsetSecs", 0.0))
+def read_vviz(path, limits=None) -> Show:
+    lim = LIMITS if limits is None else limits
+    spec = load_json_file(path, lim)
+    need(isinstance(spec, dict) and isinstance(spec.get("performances"), list), "not a .vviz file (no performances list)")
+    rate = finite(spec.get("defaultPositionRate", 1.0), "defaultPositionRate")
+    need(rate > 0, "defaultPositionRate must be positive")
+    off = finite(spec.get("timeOffsetSecs", 0.0), "timeOffsetSecs")
     g = spec.get("globalReferenceFrame") or {}
     origin = (float(g["lat"]), float(g["lon"]), float(g.get("alt", 0.0))) if "lat" in g and "lon" in g else None
-    drones = []
+    drones, total_points = [], 0
+    check_count(len(spec["performances"]), "max_drones", "drones in the show", lim)
     for p in spec["performances"]:
         a = p["agentDescription"]
         steps = a.get("agentTraversal", [])
+        need(isinstance(steps, list), f"drone {len(drones)}: agentTraversal is not a list")
+        check_count(len(steps), "max_segments", f"drone {len(drones)}: trajectory steps", lim)
+        total_points += len(steps) + 1
+        check_count(total_points, "max_points", "trajectory points in the show", lim)
+        pay = p.get("payloadDescription")
+        n_act = sum(len(x.get("payloadActions") or []) for x in pay if isinstance(x, dict)) if isinstance(pay, list) else 0
+        check_count(n_act, "max_light_length", f"drone {len(drones)}: light payload actions", lim)
         t = off + np.concatenate([[0.0], np.cumsum([s["dt"] if "dt" in s else 1.0 / rate for s in steps])])
         d = np.array([[s.get("dx", 0.0), s.get("dy", 0.0), s.get("dz", 0.0)] for s in steps]).reshape(-1, 3)
         ogl = np.cumsum(np.vstack([[a.get("homeX", 0.0), a.get("homeY", 0.0), a.get("homeZ", 0.0)], d]), 0)
         pos = ogl[:, [0, 2, 1]]                        # ogl X right, Y up, Z forward -> local x, y(forward), z(up)
+        need(bool(np.all(np.isfinite(t)) and np.all(np.isfinite(pos))), f"drone {len(drones)}: non-finite time or position")
+        need(bool(np.all(np.diff(t) >= 0)), f"drone {len(drones)}: negative dt (time goes backwards)")
 
         def at(tq, t=t, pos=pos):
             return np.stack([np.interp(tq, t, pos[:, k]) for k in range(3)], 1)
@@ -152,13 +185,26 @@ def read_vviz(path) -> Show:
              "are taken from the venue file, so C1 cannot verify the heading.",
              "positions between samples are LINEARLY interpolated (2 Hz source is typical); acceleration is an estimate.",
              "axes: ogl X = local x (right), ogl Z = local y (forward), ogl Y = up [GUESS for the horizontal mapping]."]
-    return Show(str(path), "vviz", "visualization", drones, origin, None, "nwu", None, {}, notes)
+    show = Show(str(path), "vviz", "visualization", drones, origin, None, "nwu", None, {}, notes)
+    check_show(show, lim)
+    return show
 
 
-def read_show(path) -> Show:
+def read_show(path, limits=None) -> Show:
+    """Read a .skyc or .vviz. Any malformed or over-limit file raises LimitError with a one-line reason."""
     p = str(path).lower()
     if p.endswith(".skyc"):
-        return read_skyc(path)
-    if p.endswith(".vviz"):
-        return read_vviz(path)
-    raise ValueError(f"unknown show file type: {path}")
+        reader = read_skyc
+    elif p.endswith(".vviz"):
+        reader = read_vviz
+    else:
+        raise LimitError(f"unknown show file type: {path} (expected .skyc or .vviz)")
+    try:
+        return reader(path, limits)
+    except LimitError:
+        raise
+    except MemoryError:
+        raise LimitError("ran out of memory reading the show file") from None
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError, ZeroDivisionError) as e:
+        what = f"missing field {e}" if isinstance(e, KeyError) else f"{type(e).__name__}: {str(e)[:200]}"
+        raise LimitError(f"malformed show file ({what})") from None

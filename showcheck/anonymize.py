@@ -14,6 +14,7 @@ fields, and any ZIP member not referenced by the show. ZIP timestamps are set to
 import json
 import zipfile
 from .model import geo_offset, offset_latlon
+from .limits import SafeZip
 
 FAKE_LAT, FAKE_LON = 0.0100, 0.0100
 DRONE_KEEP = ("home", "landAt", "mode", "trajectory", "lights", "pyro", "yawControl")
@@ -22,15 +23,15 @@ _STAMP = (2000, 1, 1, 0, 0, 0)
 
 def _load(z, ref):
     if isinstance(ref, dict) and "$ref" in ref:
-        return json.loads(z.read(ref["$ref"].split("#")[0].lstrip("./")))
+        return z.json(z.ref(ref["$ref"]))
     return ref
 
 
 def anonymize_skyc(src, dst, venue_origin=None):
     """Write an anonymized copy of src to dst. Returns a short list of what was changed."""
     changes = []
-    with zipfile.ZipFile(src) as z:
-        spec = json.loads(z.read("show.json"))
+    with SafeZip(src) as z:                              # same checks as the reader: size, names, zip bombs
+        spec = z.json("show.json")
         out = {"version": spec.get("version", 1)}
         env = spec.get("environment") or {}
         new_env = {"type": env.get("type", "outdoor")}

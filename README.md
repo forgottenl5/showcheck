@@ -62,6 +62,46 @@ ShowCheck's positions match Blender's own positions to within about 10 cm.
 
 **Not a safety certification. Use alongside your normal procedures.**
 
+## Handling untrusted files
+
+Show files from other people are treated as hostile until checked. ShowCheck **never extracts a `.skyc` to disk
+and never executes anything in a file**. ZIP members are streamed into memory, after the ZIP headers have been checked.
+
+What is checked before any show data is used:
+- **ZIP structure**, from the headers and again while reading (a byte counter, because headers can lie): file size,
+  member count, uncompressed size per member and in total, and compression ratio per member (zip bombs). It also
+  rejects member names that are absolute or contain `..`, `\`, a drive letter or NUL, duplicate names, symlinks,
+  encrypted members, and `$ref` links that point outside the ZIP.
+- **JSON**: file size, nesting depth, and no `NaN` / `Infinity` / overflowing numbers.
+- **Show content**: number of drones, segments per drone, total trajectory points, show duration, light program
+  length, the memory needed for the 10 Hz sampling, and finite numbers everywhere.
+- **Time**: one file may take at most 600 s (reading, checks and report), then ShowCheck stops.
+
+Any rejected file prints one line, `ERROR: rejected: <file>: <reason>`, and exits with **code 2** (1 = a check
+FAILed, 0 = all good). No Python traceback is shown; set `SHOWCHECK_DEBUG=1` if you need one.
+
+| Limit | Default | Option |
+|---|---|---|
+| Input file size | 200 MB | `--max-file-mb` |
+| ZIP members | 20,000 | `--max-members` |
+| Uncompressed size per member | 100 MB | `--max-member-mb` |
+| Uncompressed size, all members | 1024 MB | `--max-total-mb` |
+| Compression ratio per member (members over 64 KiB) | 100:1 | `--max-ratio` |
+| JSON nesting depth | 64 | `--max-json-depth` |
+| Drones | 20,000 | `--max-drones` |
+| Trajectory segments per drone | 100,000 | `--max-segments` |
+| Trajectory points, all drones | 10,000,000 | `--max-points` |
+| Show duration | 7200 s (2 h) | `--max-duration-s` |
+| Light program per drone (bytecode bytes; `.vviz`: payload actions) | 1,000,000 | `--max-light-length` |
+| Drones x 10 Hz samples held in memory | 100,000,000 | `--max-samples` |
+| Processing time per file | 600 s | `--max-seconds` |
+
+All limits are defined in one place, `showcheck/limits.py`. Every command (`check`, `compare`, `anonymize`) accepts the
+options, e.g. `python -m showcheck.cli big_show.skyc --venue v.json --max-drones 30000`. Raising a limit is safe for
+files you trust. Memory use grows with drones x show length, so a very large show may need a large machine.
+
+To report a security problem, see `SECURITY.md`.
+
 ## Try it on your show
 
 Run it locally on your own show; nothing is uploaded. Then tell us what it caught, what it missed, or what it
