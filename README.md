@@ -1,8 +1,9 @@
 # ShowCheck
 
-[![20-second demo (synthetic test show)](demo/showcheck_demo_preview.gif)](demo/showcheck_demo.mp4)
+<p align="center"><img src="demo/showcheck_demo_preview.gif" width="280" alt="ShowCheck demo (synthetic test show)"></p>
 
-*20-second demo (synthetic test show)*
+<p align="center"><em>20-second demo (synthetic test show)</em><br>
+Full 20-second video with sound: <a href="demo/showcheck_demo.mp4">demo/showcheck_demo.mp4</a> (download)</p>
 
 An independent pre-launch check of a drone-show file against the venue plan.
 
