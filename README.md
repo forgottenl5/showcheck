@@ -1,5 +1,9 @@
 # ShowCheck
 
+[![20-second demo (synthetic test show)](demo/showcheck_demo_preview.gif)](demo/showcheck_demo.mp4)
+
+*20-second demo (synthetic test show)*
+
 An independent pre-launch check of a drone-show file against the venue plan.
 
 ShowCheck reads the show file (Skybrush `.skyc`, or `.vviz` at visualization grade) and a small venue file you write
