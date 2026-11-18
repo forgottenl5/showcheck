@@ -18,8 +18,8 @@ report with a top-view picture, and a fingerprint manifest.
 | **C1 Placement** | The show's origin and heading match the venue plan, and every drone's home is on its assigned pad. |
 | **C2 Crowd distance** | No drone comes closer to a crowd area than that area's buffer. |
 | **C3 Geofence** | The file's fence matches the venue fence, every drone stays inside it with the buffer margin, and maximum altitude is within the limit. |
-| **C4 Speed and acceleration** | Max speed and acceleration are within the venue limits. For `.skyc` files they are computed exactly from the curves; the 10 Hz sampled values are shown alongside. |
-| **C5 Spacing** | The closest approach between any two drones is at least the minimum spacing. |
+| **C4 Speed and acceleration** | Max speed and acceleration are within the venue limits (or, for acceleration, the file's own `maxAccelerationXY/Z` if the venue sets none). For `.skyc` files they are computed exactly from the curves; the 10 Hz sampled values are shown alongside. |
+| **C5 Spacing** | The closest approach between any two drones is at least the minimum spacing. Pairs where either drone is below `minNavAltitude` (from the file or the venue) are skipped, as Skybrush does; the report says how many. |
 | **C6 Fingerprint** | One SHA-256 per drone (trajectory and lights) plus the placement, to compare with what each drone actually received. |
 
 ## Quick start
@@ -52,10 +52,14 @@ about the file formats, and how sure we are of each point, is in `FORMAT_NOTES.m
 ## What is verified, and what is not
 
 **Verified:** the `.skyc` axes, heading and timing conventions were confirmed against real Skybrush Studio exports.
-ShowCheck's positions match Blender's own positions to within about 10 cm.
+ShowCheck's positions match Blender's own positions to within about 10 cm. They also match Skybrush's
+[published `.skyc` documentation](https://docs.skybrush.io/public/skybrush-file-formats/skyc/index.html).
+
+The geofence layout (`polygons[{isInclusion, points}]` plus `action`) now comes from Skybrush's published schema. The
+units and frame of the fence points are still unconfirmed; we have asked Skybrush. Skybrush Studio exports carry no
+fence, so with those files C3 checks against the venue fence only.
 
 **Not verified:**
-- The geofence layout inside `.skyc` files. Skybrush Studio does not write one, so it comes from code reading only.
 - Any real show or real fleet. The examples are synthetic.
 - `.vviz` is visualization-grade only: no heading, no fence, and positions between samples are interpolated
   linearly.

@@ -2,7 +2,8 @@
 # Copyright (c) 2026 forgottenl5
 """Readers for .skyc (Skybrush compiled, ZIP) and .vviz (Verge/Finale JSON) -> model.Show.
 
-Written from FORMAT_NOTES.md; .skyc axes, origin and time conventions confirmed by a real Skybrush Studio export.
+Written from FORMAT_NOTES.md; .skyc axes, units and schema per Skybrush's published .skyc docs, and the axes, origin
+and time conventions confirmed by a real Skybrush Studio export.
 """
 import numpy as np
 from .model import Drone, Show
@@ -94,8 +95,8 @@ def read_skyc(path, limits=None) -> Show:
         if isinstance(cs, dict) and cs.get("type") in ("nwu", "neu"):
             handed = cs["type"]
         else:
-            notes.append("axis handedness not stored in .skyc; NWU-type (x = orientation, y = 90 deg left of x, z up), "
-                         "as Skybrush Studio writes Blender's right-handed X/Y/Z unchanged [confirmed by real export].")
+            notes.append("axes front-left-up: x = orientation, y = 90 deg left of x, z up (right-handed) per Skybrush's "
+                         ".skyc docs [DOC], and confirmed by a real Skybrush Studio export.")
         if origin is None:
             notes.append("no show origin in file; venue origin will be assumed (C1 cannot verify it).")
 
@@ -110,11 +111,16 @@ def read_skyc(path, limits=None) -> Show:
         if fence is None:
             notes.append("no geofence in the file (Skybrush Studio has no geofence setting); C3 checks the venue fence only.")
         val = settings.get("validation") or {}
-        limits = {k2: float(val[k1]) for k1, k2 in [("maxVelocityXY", "max_speed_xy"), ("maxVelocityZ", "max_speed_z"),
-                                                    ("maxVelocityZUp", "max_speed_z_up"), ("minDistance", "min_spacing_m"),
-                                                    ("maxAltitude", "max_altitude_m")] if val.get(k1) is not None}
+        need(isinstance(val, dict), "settings.validation is not a JSON object")
+        # [DOC] Skybrush .skyc schema: all optional, SI units (m, m/s, m/s2); maxAltitude is m above ground level
+        limits = {k2: finite(val[k1], f"settings.validation.{k1}")
+                  for k1, k2 in [("maxVelocityXY", "max_speed_xy"), ("maxVelocityZ", "max_speed_z"),
+                                 ("maxVelocityZUp", "max_speed_z_up"), ("minDistance", "min_spacing_m"),
+                                 ("maxAltitude", "max_altitude_m"), ("maxAccelerationXY", "max_accel_xy"),
+                                 ("maxAccelerationZ", "max_accel_z"), ("minNavAltitude", "min_nav_altitude_m")]
+                  if val.get(k1) is not None}
 
-        drones, shifted, total_points = [], False, 0
+        drones, shifted, no_takeoff, total_points = [], False, 0, 0
         swarm = spec["swarm"]["drones"]
         need(isinstance(swarm, list), "swarm.drones is not a list")
         check_count(len(swarm), "max_drones", "drones in the show", lim)
@@ -128,6 +134,7 @@ def read_skyc(path, limits=None) -> Show:
             check_count(len(traj["points"]) - 1, "max_segments", f"drone {i}: trajectory segments", lim)
             total_points += len(traj["points"])
             check_count(total_points, "max_points", "trajectory points in the show", lim)
+            no_takeoff += traj.get("takeoffTime") is None              # [DOC] optional, defaults to 0
             shift = finite(traj.get("takeoffTime") or 0.0, f"drone {i}: takeoffTime")
             shifted |= shift != 0
             at, ts, te, segs = _trajectory_fn(traj["points"], shift)
@@ -137,7 +144,9 @@ def read_skyc(path, limits=None) -> Show:
             if s.get("pyro") is not None:
                 raw["pyro"] = _resolve(z, s["pyro"])
             drones.append(Drone(str(s.get("name", i)), home, at, ts, te,
-                                traj.get("takeoffTime"), traj.get("landingTime"), segs, raw))
+                                shift, traj.get("landingTime"), segs, raw))
+        if no_takeoff:
+            notes.append(f"{no_takeoff} drone(s) have no takeoffTime; treated as 0 (Skybrush schema default).")
         if shifted:
             notes.append("trajectory times shifted by takeoffTime (show time = t + takeoffTime) [confirmed by real export].")
         notes.append("trajectories evaluated exactly from the Bezier segments, sampled at 10 Hz.")

@@ -250,3 +250,94 @@ def test_anonymize_keeps_verdicts(tmp_path):
     from showcheck.anonymize import anonymize_skyc
     anonymize_skyc(src, str(tmp_path / "plain.skyc"))
     assert read_skyc(str(tmp_path / "plain.skyc")).origin == pytest.approx((0.01, 0.01, 0.0))
+
+
+# ---------------------------------------------------------------- Skybrush published .skyc schema
+import zipfile                                                  # noqa: E402
+
+
+def _skyc(tmp_path, drones, validation=None, name="s.skyc"):
+    """drones: list of per-drone settings dicts (inline trajectory/lights). No origin: the venue origin is used."""
+    spec = {"version": 1, "environment": {"type": "outdoor"}, "swarm": {"drones": [{"type": "generic", "settings": s} for s in drones]}}
+    if validation is not None:
+        spec["settings"] = {"validation": validation}
+    path = str(tmp_path / name)
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("show.json", json.dumps(spec))
+    return path
+
+
+def _traj(points, **kw):
+    return {"version": 1, "points": points, **kw}
+
+
+def _ground_close_air_apart():
+    """Two drones 0.5 m apart on the ground; they spread to 6 m apart at 1 m, then climb to 10 m together."""
+    def pts(x0, x1):
+        return [[0, [x0, 0, 0], []], [5, [x0, 0, 0], []], [8, [x1, 0, 1], []], [15, [x1, 0, 10], []], [20, [x1, 0, 10], []]]
+    return [{"name": "a", "home": [0, 0, 0], "trajectory": _traj(pts(0.0, -3.0), takeoffTime=0)},
+            {"name": "b", "home": [0.5, 0, 0], "trajectory": _traj(pts(0.5, 3.0), takeoffTime=0)}]
+
+
+def test_c5_skips_pairs_below_min_nav_altitude(tmp_path):
+    from showcheck.checks import c5_spacing, prepare
+    ven = load_venue(synth.venue_dict())                       # min_spacing_m 2.0
+    plain = read_skyc(_skyc(tmp_path, _ground_close_air_apart(), name="plain.skyc"))
+    r = c5_spacing(plain, ven, prepare(plain, ven))
+    assert r.status == "FAIL" and r.summary.startswith("0.50 m")       # no minNavAltitude: pads count, as before
+    assert any("no minNavAltitude" in d for d in r.details)
+
+    show = read_skyc(_skyc(tmp_path, _ground_close_air_apart(), {"minNavAltitude": 2.5}))
+    assert show.limits["min_nav_altitude_m"] == 2.5
+    r = c5_spacing(show, ven, prepare(show, ven))
+    assert r.status == "PASS" and r.summary.startswith("6.00 m"), r.summary
+    nav = next(d for d in r.details if d.startswith("minNavAltitude"))
+    assert "file settings.validation.minNavAltitude" in nav and "below 2.5 m" in nav
+    # every frame until both pass 2.5 m (t ~ 9.2 s) is skipped, and nothing after it
+    frames = int(nav.split(" frames")[0].split(" in ")[-1].split(" of ")[0])
+    assert 90 <= frames <= 95, nav
+
+    ven["limits"]["min_nav_altitude_m"] = 0.0                  # venue value wins over the file's
+    r = c5_spacing(show, ven, prepare(show, ven))
+    assert r.status == "FAIL" and any("venue limits.min_nav_altitude_m (file minNavAltitude 2.5 not used" in d for d in r.details)
+
+    ven["limits"]["min_nav_altitude_m"] = 50.0                 # nobody ever above it: nothing checked -> WARN
+    r = c5_spacing(show, ven, prepare(show, ven))
+    assert r.status == "WARN" and "nothing checked" in r.summary
+
+
+def test_file_acceleration_limits_used_when_venue_has_none(tmp_path):
+    from showcheck.checks import c4_dynamics, prepare
+    show = read_skyc(_skyc(tmp_path, _ground_close_air_apart(),
+                           {"maxAccelerationXY": 6.0, "maxAccelerationZ": 1.0, "minNavAltitude": 2.5}))
+    assert show.limits["max_accel_xy"] == 6.0 and show.limits["max_accel_z"] == 1.0
+    ven = load_venue(synth.venue_dict())                       # venue max_accel_mps2 4.0 wins
+    r = c4_dynamics(show, ven, prepare(show, ven))
+    assert any("venue limits.max_accel_mps2 4 m/s2 (3-D) used; file maxAccelerationXY 6 / maxAccelerationZ 1" in d
+               for d in r.details), r.details
+    ven["limits"].pop("max_accel_mps2")
+    r = c4_dynamics(show, ven, prepare(show, ven))
+    assert any("file settings.validation maxAccelerationXY 6 / maxAccelerationZ 1 m/s2 used" in d for d in r.details)
+    # straight segments: the 1.29 m/s climb stops dead at 15 s, a vertical jump over the 0.1 m/s allowed (1.0 x 0.1 s)
+    vj = next(d for d in r.details if d.startswith("largest vertical velocity jump"))
+    assert "2 drone(s) over" in vj and r.status == "FAIL"
+    assert any(d.startswith("max horizontal acceleration") for d in r.details)
+
+
+def test_drone_without_lights(tmp_path):
+    drones = _ground_close_air_apart()
+    drones[1]["lights"] = {"version": 1, "data": ""}           # drone "a" has no lights entry at all
+    show = read_skyc(_skyc(tmp_path, drones))
+    assert show.drones[0].raw["lights"] is None
+    r = {x.id: x for x in run_checks(show, load_venue(synth.venue_dict()))[0]}
+    assert r["C6"].status == "WARN" and any("1 drone(s) have no light program" in d for d in r["C6"].details)
+
+
+def test_trajectory_without_takeoff_time_is_zero(tmp_path):
+    pts = [[0, [0, 0, 0], []], [10, [0, 0, 10], []]]
+    show = read_skyc(_skyc(tmp_path, [{"name": "a", "trajectory": _traj(pts)},
+                                      {"name": "b", "trajectory": _traj([[0, [5, 0, 0], []], [10, [5, 0, 10], []]], takeoffTime=0)}]))
+    a = show.drones[0]
+    assert a.takeoff == 0.0 and a.t_start == 0.0 and a.t_end == 10.0
+    assert np.allclose(a.at(np.array([5.0]))[0], [0, 0, 5])     # not shifted
+    assert any("1 drone(s) have no takeoffTime; treated as 0" in n for n in show.notes)

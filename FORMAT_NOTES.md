@@ -1,6 +1,6 @@
 # ShowCheck: drone-show file format notes
 
-Research date: 2026-11-16.
+Research date: 2026-11-16. Updated 2026-11-17 against Skybrush's published `.skyc` documentation (see Sources).
 
 How sure each statement is:
 - **[DOC]**: stated in official public documentation.
@@ -66,7 +66,13 @@ drones/drone_02/...   drones/drone_03/...
 
 `show.json` points to the per-drone files with JSON `$ref` links, e.g. `{"$ref": "./drones/drone_01/trajectory.json#"}`. The JS loader resolves these from the zip (`compiled.ts`: `$ref: 'zip:show.json'`) [CODE]. Skybrush Server later splits a `.skyc` into one compact binary `.skyb` file per drone [DOC: Live glossary].
 
-**`show.json` structure** (TypeScript `ShowSpecification` in `skybrush.js/packages/show-format/src/types.ts`) [CODE]:
+**Units and axes** [DOC: Skybrush `.skyc` docs, "Units, coordinate system and yaw"]:
+- SI units throughout: time in seconds, distances in metres, angles in degrees.
+- Flat-Earth, right-handed frame relative to the show origin: X = front, Y = left, Z = up.
+- `environment.location.orientation` is the bearing of the X+ axis from North, measured clockwise (0 = North, 90 = East).
+
+**`show.json` structure** (TypeScript `ShowSpecification` in `skybrush.js/packages/show-format/src/types.ts` [CODE];
+field names, types and required/optional confirmed by the published JSON schema where marked [DOC]):
 - `version`: must be `1`; other versions are rejected by `validation.ts`.
 - `environment`:
   - `type`: `"outdoor"` or `"indoor"`.
@@ -77,30 +83,39 @@ drones/drone_02/...   drones/drone_03/...
 - `media.audio`: MP3, embedded or as a separate asset, with `startTime`.
 - `settings`:
   - `cues`: `{version, items:[{name, time}]}`.
-  - `geofence`: `{version: 1, polygons:[{isInclusion, points: [[x,y,z],…]}], action}`, where `action` is one of report, land, return, smartLand, smartReturn, stop or shutDown.
-  - `validation`: `{maxAltitude, maxVelocityXY, maxVelocityZ, maxVelocityZUp, minDistance}`.
+  - `geofence`: `{version, polygons: [{isInclusion, points}], action}` [DOC]. `version`, `polygons`, and each polygon's `isInclusion` and `points` are required; `action` is optional [DOC]. The `action` values (report, land, return, smartLand, smartReturn, stop, shutDown) and points as `[x, y, z]` come from code only [CODE].
+  - `validation` [DOC], all optional numbers in SI units:
+    - `maxAccelerationXY`, `maxAccelerationZ` (m/s²);
+    - `maxVelocityXY`, `maxVelocityZ`, `maxVelocityZUp` (m/s);
+    - `maxAltitude` (m **above ground level**);
+    - `minDistance` (m between drones);
+    - `minNavAltitude` (m): below it horizontal motion is discouraged and neighbour distances are not checked.
 - `swarm.drones[]`: each `{type: "generic", settings: {...}}`.
 
-**Per-drone `settings`:**
+**Per-drone `settings`** [DOC]: only `trajectory` is required. Documented optional fields: `name`, `lights`, `pyro`,
+`rthPlan` (`version`, `acceleration`, `landingSpeed`, `entries` required; `landingAltitude` optional), `yawControl`,
+`home`, `landAt` and `extra`. A drone without `lights` is valid; ShowCheck hashes its lights as null and C6 WARNs.
 - From the official fixture [CODE]: `trajectory`, `lights`, `mode: "show"`, `home: [x, y, z]`.
 - From the Studio exporter [CODE]: `name`, `pyro`, `yawControl: {version, setpoints: [[t, yawDeg], …]}`.
 - The server's per-drone type also lists `landAt`, `rthPlan`, `group`, `extra`, `geofence`, `coordinateSystem`, `amslReference` [CODE: `skybrush-server/.../show/specification.py`].
   - [GUESS, consistent with the code] The last three are added by Skybrush Live when it uploads the show to each drone; they are not stored per drone in the `.skyc`.
-- The per-drone schema types (`SwarmSpecification`, `Trajectory`, `PyroProgram`, `RTHPlan`) come from `@skybrush/file-formats-doc`. **That package is not public:** the GitHub repo returns 404 and it is not on npm. So the per-drone part is known only from code and fixtures.
+- The per-drone schema types (`SwarmSpecification`, `Trajectory`, `PyroProgram`, `RTHPlan`) come from `@skybrush/file-formats-doc`. That package is still not public (GitHub 404, not on npm), but Skybrush now publishes the `.skyc` documentation and the JSON schema built from it [DOC].
 
 **Origin and orientation** [CODE: `studio-blender/src/modules/sbstudio/model/location.py`]:
 - `environment.location.origin` = `[round(lat·1e7), round(lon·1e7), round(amsl_m·1e3)?]`. These are **integers**: degrees × 10⁷, and altitude in **millimetres**, which is optional.
-- `orientation` = "angle of the X+ axis of the show coordinate system relative to North (towards East), in degrees". It is labelled a *proposed* placement; the operator fixes the final placement in Live.
+- `orientation` = "angle of the X+ axis of the show coordinate system relative to North (towards East), in degrees". It is labelled a *proposed* placement; the operator fixes the final placement in Live. Bearing from North, clockwise, is now also [DOC].
+- The docs say the origin is stored as latitude, longitude and an altitude that may be AMSL or AGL. They do not give the encoding or say how to tell which altitude it is [DOC]. The ×10⁷ / millimetre encoding above is from code and real export only.
 - At flight time the server receives `coordinateSystem = {origin, orientation (as a string), type: "nwu" | "neu"}` [CODE: `ext/show/metadata.py`].
   - That docstring says the origin is "(longitude, latitude)", **the opposite order from the `.skyc` origin** [CODE]. ShowCheck must not mix the two up.
 - `amslReference` is the AMSL altitude that Z is measured from; if absent, Z is relative to home altitude [CODE].
 
-**Axes** [CODE]:
-- Z is up: in the fixture, drones climb from z = 1 to z = 15 with home z = 0.
-- Whether X/Y are a right-handed NWU-style frame or NEU depends on `coordinateSystem.type`, which is not stored in the `.skyc` [CODE + GUESS].
+**Axes** [DOC]:
+- X = front, Y = left, Z = up: right-handed, Z up. This is the NWU-type frame ShowCheck assumes, and it matches the real export (see Ground-truth status).
+- Z is up in the fixture too: drones climb from z = 1 to z = 15 with home z = 0 [CODE].
+- The server's `coordinateSystem.type` (`nwu` / `neu`) is not stored in the `.skyc` [CODE]; ShowCheck still honours it if present.
 
 **Trajectory** (`trajectory.json`) [CODE: `trajectory.ts`, fixture]:
-- Format: `{version: 1, points: [[t, [x,y,z], [controlPoints…]], …], takeoffTime, landingTime}`.
+- Format: `{version: 1, points: [[t, [x,y,z], [controlPoints…]], …], takeoffTime, landingTime}`. `version` and `points` are required; `takeoffTime` is optional and **defaults to 0**; `landingTime` is optional [DOC].
 - Each segment runs from the previous point to this one: no control points means a straight line; 1 point means a quadratic Bézier; 2 points mean a cubic. Anything else is rejected. These are continuous Bézier curves, not sampled positions [DOC: Viewer 2.6.0 notes].
 - Times are relative; the player shifts them by `takeoffTime` (`_shiftSegments(takeoffTime)`). [GUESS] So absolute time = t + takeoffTime.
   - The fixture has points from 0 to 10 s with `takeoffTime: 11.66` and `landingTime: 225.92`. That suggests the fixture was trimmed and only covers part of the show.
@@ -108,6 +123,7 @@ drones/drone_02/...   drones/drone_03/...
 **Lights** (`lights.json`): `{version: 1, data: "<base64>"}`. The data is a compiled LED bytecode program, decoded by `lights.ts` and by `pyledctrl` (GPL-3.0) [CODE].
 
 **Home, takeoff and landing:**
+- `home` and `landAt` are arrays of relative coordinates; the docs refer to a separate schema for their type that is not shown [DOC].
 - Per-drone `home` is used to match a physical drone to a trajectory; launch is blocked if no drone matches a home position [third-party wiki, AIMotionLab fork; not official].
 - `landAt` holds the landing position [CODE: server type].
 - `meta.segments` holds the takeoff/show/landing time windows [CODE].
@@ -116,7 +132,7 @@ drones/drone_02/...   drones/drone_03/...
 
 | Format | Status | What it is |
 |---|---|---|
-| `.skyb` (Skybrush binary, per drone) | Official C parser `libskybrush` (GitHub licence: NOASSERTION); the spec lives in the non-public file-formats-doc repo | What the drone actually flies |
+| `.skyb` (Skybrush binary, per drone) | Official C parser `libskybrush` (GitHub licence: NOASSERTION). Format docs now published [DOC]: blocks for trajectories, light programs, **RTH plans**, comments, yaw control, event lists, GCS light control setup and metadata, with an ImHex spec | What the drone actually flies |
 | Skybrush CSV export | [DOC] Export panel | ZIP with one CSV per drone: time (ms), X, Y, Z (m), R, G, B (0–255 linear). Needs a separately distributed add-on |
 | MAVSDK Drone Show (MDS) CSVs | [DOC] project docs (`alireza787b/mavsdk_drone_show`, GitHub licence NOASSERTION) | Per-drone time-stamped CSV with N/E/D + RGB for shows, and lat/lon/MSL waypoint CSVs for swarm missions. Column layout changes between versions (see their CSV migration guide) |
 | Crazyswarm / Crazyswarm2 trajectories | MIT; open-source research swarm (Crazyflie) | Piecewise-polynomial trajectory CSVs; indoor research, not commercial shows. Mentioned only for completeness |
@@ -132,11 +148,11 @@ drones/drone_02/...   drones/drone_03/...
 | **Heading / orientation** | **No field.** Rotation is set in the importing tool [DOC Finale]. ShowCheck must ask the user for it (or assume Finale's "north into screen" default) and say so. | `environment.location.orientation`: X+ axis in degrees from North towards East [CODE]. Check: present and matches the venue plan. |
 | **Home / launch positions** | `homeX/Y/Z` [DOC]. Check spacing, duplicates, a flat grid. | `settings.home` per drone [CODE]. Same checks; also `landAt`. |
 | **Closest approach** | Rebuild positions (home + cumulative deltas, `dt` rule) [DOC]. Path *between* samples is unknown; I used linear interpolation [GUESS]. | Evaluate the Bézier segments exactly [CODE]. Compare against `settings.validation.minDistance` if set. |
-| **Geofence** | **No field.** Can only check against a user-supplied polygon, or report the bounding box/hull. | `settings.geofence.polygons` (inclusion/exclusion) + `action` [CODE]. Check every trajectory stays inside the inclusion polygons and outside the exclusion ones. Point units are probably show-frame metres [GUESS]. |
+| **Geofence** | **No field.** Can only check against a user-supplied polygon, or report the bounding box/hull. | `settings.geofence.polygons[{isInclusion, points}]` + `action` [DOC]. Check every trajectory stays inside the inclusion polygons and outside the exclusion ones. Point dimensions, units and frame are not documented; probably show-frame metres [GUESS]. |
 | **Speed** | Finite differences on the reconstructed track. | Bézier derivative, exact [CODE]. Compare with `maxVelocityXY`, `maxVelocityZ`, `maxVelocityZUp`. |
-| **Acceleration** | Only rough: linear interpolation between samples creates corner spikes (artefacts). Needs smoothing or knowledge of how Verge interpolates [GUESS]. | Second derivative of the Béziers [CODE]. No acceleration limit exists in `validation` [CODE], so the threshold must come from ShowCheck config. |
-| **Altitude** | Max/min Y [DOC: Y up]. | Z max vs `validation.maxAltitude`; `amslReference` if present. |
-| **Spacing / takeoff / landing** | Home spacing; path to the final position. | `meta.segments` windows, `takeoffTime`/`landingTime`, `home` vs `landAt` spacing. |
+| **Acceleration** | Only rough: linear interpolation between samples creates corner spikes (artefacts). Needs smoothing or knowledge of how Verge interpolates [GUESS]. | Second derivative of the Béziers [CODE]. Compare with `validation.maxAccelerationXY` / `maxAccelerationZ` [DOC]; a venue limit wins if set. |
+| **Altitude** | Max/min Y [DOC: Y up]. | Z max vs `validation.maxAltitude` (m AGL [DOC]); `amslReference` if present. |
+| **Spacing / takeoff / landing** | Home spacing; path to the final position. | Closest pair vs `validation.minDistance`, skipping pairs below `validation.minNavAltitude` [DOC]. `meta.segments` windows, `takeoffTime`/`landingTime`, `home` vs `landAt` spacing. |
 | **Per-drone version** | None. Only file `version: "1.0"` and free-text `airframe`. | File `version: 1`, plus `version: 1` inside each trajectory, lights, pyro, cue sheet and geofence [CODE]. **No firmware or airframe version per drone**; `type: "generic"` only. |
 | **Timing consistency** | Position total vs light total per drone (should match). | Trajectory end vs `landingTime` vs `meta.segments`. |
 | **Pyro** | `eventTime` within the show time, and the drone is airborne and clear of others at that moment. | `settings.pyro` (exists per the Studio exporter; schema not public) [CODE]. |
@@ -146,15 +162,24 @@ drones/drone_02/...   drones/drone_03/...
 ## 3. What is missing or unknown
 
 1. **No real flight `.skyc` files.** Besides our own small Studio exports (see Ground-truth status), the only public `.skyc` files found are the two small official test fixtures in `skybrush-io/skybrush.js` (`test-show.skyc`, `test-show-with-assets.skyc`; 3 drones; GPL-3.0-or-later repo). Using them for testing is fine; shipping them inside a closed product would bring in the GPL [GUESS; not legal advice].
-2. **The official `.skyc` and `.skyb` schemas are not public.** `@skybrush/file-formats-doc` returns 404 on GitHub and isn't on npm. Everything per drone above comes from code and fixtures, not a spec, and could change.
+2. **The `.skyc` and `.skyb` docs are now published** by Skybrush (see Sources). The `.skyc` pages give units, axes and the JSON schema; the `.skyb` pages describe its blocks, including RTH plans. The source package `@skybrush/file-formats-doc` is still not public. What the docs leave open is listed under "Still unclear in the docs" below.
 3. **VVIZ heading:** there is no field linking local axes to North. Placement in the world needs outside information.
 4. **VVIZ interpolation between samples** is undocumented (linear? spline?). Closeness and acceleration between samples are estimates.
 5. **The VVIZ `frames` meaning** (time delta vs hold) is contradictory between Verge and Finale.
-6. **Units** of `globalReferenceFrame.alt`, `homeX/Y/Z`, geofence points and `.skyc` coordinates are not stated anywhere; metres are assumed [GUESS].
+6. **Units** of `globalReferenceFrame.alt` and `homeX/Y/Z` (VVIZ) are not stated anywhere; metres are assumed [GUESS]. `.skyc` uses SI units (s, m, deg) [DOC], but the geofence point units are not given (see below).
 7. **Third-party formats** (Depence `.ddsf`, DSS, HighGreat, EVSKY…) have no public specs.
 8. **Licensing for ShowCheck:**
     - All Skybrush repos are GPL-3.0, except `libskybrush` (NOASSERTION on GitHub) and `skybrush-log-analyzer-cli` (MIT).
     - [GUESS] An independent checker should be written from the documented and observed *format* (that's interoperability), not by copying GPL code, unless ShowCheck itself will be GPL.
+
+### Still unclear in the docs
+
+The published `.skyc` docs leave these open:
+- **Origin:** the encoding (code and real export show integers: lat/lon × 10⁷, altitude in mm), the altitude unit, and whether the altitude is AMSL or AGL. The docs say it can be either and give no way to tell.
+- **Geofence:** the dimensions of each point (2-D or 3-D), their frame (show-local or geodetic) and units, and the allowed `action` values. We have asked Skybrush.
+- **`maxAltitude`:** documented as metres above ground level. ShowCheck compares altitude with Z above the show origin, which is the same only when the origin is at ground level.
+- **`home` / `landAt`:** typed as arrays of "relative coordinates" from a separate schema that is not shown.
+- **`rthPlan.entries`:** required, but the entry fields are not documented.
 
 ---
 
@@ -166,6 +191,9 @@ drones/drone_02/...   drones/drone_03/...
 - Finale 3D, Importing drone shows: https://finale3d.com/documentation/importing-drone-shows/
 
 **Skybrush documentation**
+- `.skyc` format overview: https://docs.skybrush.io/public/skybrush-file-formats/skyc/index.html
+- `.skyc` units, coordinate system and yaw: https://docs.skybrush.io/public/skybrush-file-formats/skyc/coordinates.html
+- `.skyc` JSON schema: https://docs.skybrush.io/public/skybrush-file-formats/skyc/schema.html
 - Studio for Blender, Export panel: https://docs.skybrush.io/public/skybrush-studio-for-blender/latest/panels/safety_and_export/export.html
 - Glossary (.skyc / .skyb): https://docs.skybrush.io/public/skybrush-live-doc/2.8.1/appendix/glossary.html and https://docs.skybrush.io/public/skybrush-studio-for-blender/latest/appendix/glossary.html
 - Protocol SHOW messages: https://docs.skybrush.io/public/skybrush-protocol-spec/latest/messages/show.html
@@ -205,8 +233,8 @@ Confirmed by real export:
 - **Origin:** `environment.location.origin` = `[round(lat·1e7), round(lon·1e7)]`, JSON integers, with NO altitude element (0.0100 deg → 100000). [confirmed by real export]
 - **Time:** point times are relative to `takeoffTime`; show time = t + `takeoffTime`. In `known4_delayed`, `takeoffTime` = 5.0 and points start at 0. Reading them as t + 5 reproduces Blender to ≤ 0.095 m; reading them without the shift is off by 16.3 m. `landingTime` is absolute (30.0 = 5 + last t 25.0). Before `takeoffTime` the drone sits at `home`. [confirmed by real export]
 - **Curves:** the server re-fits the sampled motion (default 4 fps) as cubic Bézier segments `[t, [x,y,z], [cp1, cp2]]` or straight segments `[t, p, []]`. Evaluating with u linear in time matches Blender to ≤ 0.067 m (`known4`) and ≤ 0.095 m (`known4_delayed`). The fit leaves velocity jumps of up to 0.30 m/s where segments meet. [confirmed by real export]
-- **Geofence:** Skybrush Studio has no geofence setting, and the export has no `settings.geofence`. A fence in a `.skyc` must come from another tool (e.g. Skybrush Live). The polygon layout (`polygons[{isInclusion, points}]`) is therefore still unconfirmed. [confirmed absent; layout still from CODE]
-- **Other fields seen:** `settings.validation` holds maxAccelerationXY/Z, maxAltitude, maxVelocityXY/Z, maxYawRate, minDistance and minNavAltitude. `settings.cues` points to `cues.json`. `meta.segments.takeoff` = [0, 0] when there is no storyboard. `environment.type` = "outdoor".
+- **Geofence:** Skybrush Studio has no geofence setting, and the export has no `settings.geofence`. A fence in a `.skyc` must come from another tool (e.g. Skybrush Live). The polygon layout (`polygons[{isInclusion, points}]`) now comes from the published schema [DOC]; point units and frame are still unconfirmed. [confirmed absent in Studio exports]
+- **Other fields seen:** `settings.validation` holds maxAccelerationXY/Z, maxAltitude, maxVelocityXY/Z, maxYawRate, minDistance and minNavAltitude. All but maxYawRate are in the published schema [DOC]. ShowCheck reads maxAccelerationXY/Z (C4) and minNavAltitude (C5); a venue value wins if set. `settings.cues` points to `cues.json`. `meta.segments.takeoff` = [0, 0] when there is no storyboard. `environment.type` = "outdoor".
 
 Reader changes made because of this:
 - Origin ×1e7 is now detected by integer type, not by size. The old > 1000 test would have misread a real origin within ~0.0001 deg of the equator or prime meridian.

@@ -50,8 +50,21 @@ def segment_extremes(t0, t1, cp):
 
 
 def drone_extremes(segments):
-    """Max speed / acceleration over a drone's segments, plus the largest velocity jump at a segment join."""
-    best = {"v": 0.0, "tv": 0.0, "a": 0.0, "ta": 0.0, "jump": 0.0, "tj": 0.0}
+    """Max speed / acceleration over a drone's segments, plus the largest velocity jump at a segment join.
+
+    Also the horizontal (xy) and vertical (z) parts separately: "axy"/"az" (acceleration is linear in u, so each
+    component's maximum is at a segment end) and "jxy"/"jz" (velocity jumps at joins).
+    """
+    best = {"v": 0.0, "tv": 0.0, "a": 0.0, "ta": 0.0, "jump": 0.0, "tj": 0.0,
+            "axy": 0.0, "taxy": 0.0, "az": 0.0, "taz": 0.0, "jxy": 0.0, "tjxy": 0.0, "jz": 0.0, "tjz": 0.0}
+
+    def comp(vec, t, a_key, t_key, z_key, tz_key):
+        h, z = float(np.linalg.norm(vec[:2])), float(abs(vec[2]))
+        if h > best[a_key]:
+            best.update({a_key: h, t_key: t})
+        if z > best[z_key]:
+            best.update({z_key: z, tz_key: t})
+
     prev_end = np.zeros(3)                                      # drone is at rest before the first point
     for t0, t1, cp in segments:
         v, tv, acc, ta, vs, ve = segment_extremes(t0, t1, cp)
@@ -61,11 +74,19 @@ def drone_extremes(segments):
             best.update(v=v, tv=tv)
         if acc > best["a"]:
             best.update(a=acc, ta=ta)
-        jump = float(np.linalg.norm(vs - prev_end))
+        dt2 = (t1 - t0) ** 2
+        _, (acc0, acc1) = _deriv(np.asarray(cp, float))
+        comp(acc0 / dt2, t0, "axy", "taxy", "az", "taz")
+        comp(acc1 / dt2, t1, "axy", "taxy", "az", "taz")
+        jv = vs - prev_end
+        jump = float(np.linalg.norm(jv))
         if jump > best["jump"]:
             best.update(jump=jump, tj=t0)
+        comp(jv, t0, "jxy", "tjxy", "jz", "tjz")
         prev_end = ve
     jump = float(np.linalg.norm(prev_end))                      # and at rest after the last point
-    if segments and jump > best["jump"]:
-        best.update(jump=jump, tj=segments[-1][1])
+    if segments:
+        if jump > best["jump"]:
+            best.update(jump=jump, tj=segments[-1][1])
+        comp(prev_end, segments[-1][1], "jxy", "tjxy", "jz", "tjz")
     return best
