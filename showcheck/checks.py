@@ -6,6 +6,7 @@ import numpy as np
 from .model import sample, local_to_venue, heading_diff, geo_offset, RATE_HZ
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
+DEFAULT_MIN_NAV_ALTITUDE_M = 2.5        # Skybrush firmware SHOW_TAKEOFF_ALT default, used when no file/venue value
 
 
 @dataclass
@@ -190,147 +191,143 @@ def c3_fence(show, venue, ctx):
 
 
 # ------------------------------------------------------------ C4
+def _judge(name, unit, peak, tk, limit, src, level, show, ctx, det, pts, st, top=True):
+    """One quantity (per-drone peaks, 10 Hz frame index of each) against one limit; `level` (FAIL/WARN) when over."""
+    bad = int((peak > limit).sum())
+    st.append(PASS if bad == 0 else level)
+    i = int(np.argmax(peak))
+    det.append(f"max {name} {peak.max():.3f} {unit} vs {src} {limit:g}: {bad} drone(s) over"
+               + (f" ({level})" if bad else "") + f"; worst {show.drones[i].id} @ {ctx['t'][tk[i]]:.1f} s")
+    if top:
+        det.append(f"top 5 {name}: " + "; ".join(f"{show.drones[j].id} {peak[j]:.2f} @ {ctx['t'][tk[j]]:.1f} s"
+                                                 for j in np.argsort(-peak)[:5]))
+    if level == FAIL:
+        for j in np.argsort(-peak)[:5]:
+            if peak[j] > limit:
+                pts.append((*ctx["P"][j, tk[j], :2], f"{name} {peak[j]:.1f}"))
+
+
 def c4_dynamics(show, venue, ctx):
-    lim = venue["limits"]
-    vmax, amax = lim.get("max_speed_mps"), lim.get("max_accel_mps2")
+    """Speed and acceleration.
+
+    Venue limits (limits.max_speed_mps, limits.max_accel_mps2, both 3-D) can FAIL. The file's settings.validation
+    levels (maxVelocityXY / Z / ZUp, maxAccelerationXY / Z) are the designer's warning levels: they only ever WARN.
+    """
+    from .dynamics import drone_speeds, acceleration_peaks, CTRL_RATE_HZ
+    lim, flim = venue["limits"], getattr(show, "limits", None) or {}
+    rate = float(ctx.get("ctrl_rate", CTRL_RATE_HZ))
     P, t = ctx["P"], ctx["t"]
-    v = np.diff(P, axis=1) * RATE_HZ                       # (D, T-1, 3)
-    sp = np.linalg.norm(v, axis=2)
-    acv = np.diff(v, axis=1) * RATE_HZ                     # (D, T-2, 3)
-    ac = np.linalg.norm(acv, axis=2)
-    s10 = {"speed": (sp.max(1), sp.argmax(1)), "acceleration": (ac.max(1), ac.argmax(1) + 1)}
-    # file acceleration limits are per component (Skybrush maxAccelerationXY / maxAccelerationZ); the venue's is 3-D
-    flim = getattr(show, "limits", None) or {}
-    fxy, fz = flim.get("max_accel_xy"), flim.get("max_accel_z")
-    use_file_acc = amax is None and (fxy is not None or fz is not None)
-    exact = all(d.segments is not None for d in show.drones)
+    tidx = lambda tt: int(np.clip(np.round((tt - t[0]) * RATE_HZ), 0, len(t) - 1))
+    vgrade = show.grade != "flight"           # visualization-grade (.vviz): linear path, its corners are artefacts
     det, pts, st = [], [], []
-    if exact:                                               # analytic values from the Bezier segments (.skyc)
-        from .dynamics import drone_extremes
-        ex = [drone_extremes(d.segments) for d in show.drones]
-        tidx = lambda tt: int(np.clip(np.searchsorted(t, tt), 0, len(t) - 1))
-        sx = {"speed": (np.array([e["v"] for e in ex]), np.array([tidx(e["tv"]) for e in ex])),
-              "acceleration": (np.array([e["a"] for e in ex]), np.array([tidx(e["ta"]) for e in ex]))}
-        jumps = np.array([e["jump"] for e in ex])
-        det.append("verdict uses EXACT values from the Bezier segments; the 10 Hz sampled value is shown in brackets")
-    fdesc = " / ".join(f"{n} {x:g}" for n, x in (("maxAccelerationXY", fxy), ("maxAccelerationZ", fz)) if x is not None)
-    if amax is not None:
-        det.append(f"acceleration limit: venue limits.max_accel_mps2 {amax:g} m/s2 (3-D) used"
-                   + (f"; file {fdesc} m/s2 not used (venue wins)" if fdesc else ""))
-    elif use_file_acc:
-        det.append(f"acceleration limit: file settings.validation {fdesc} m/s2 used (venue has no max_accel_mps2); "
-                   "checked as horizontal and vertical parts")
-    vgrade = show.grade != "flight"           # visualization-grade: acceleration is an estimate
-    for name, lmt, unit in [("speed", vmax, "m/s"), ("acceleration", amax, "m/s2")]:
-        peak10, k10 = s10[name]
-        peak, kk = sx[name] if exact else s10[name]
-        if lmt is None and name == "acceleration" and use_file_acc:
-            for key, clim, label, a10 in [("axy", fxy, "horizontal", np.linalg.norm(acv[..., :2], axis=2)),
-                                          ("az", fz, "vertical", np.abs(acv[..., 2]))]:
-                if clim is None:
-                    continue
-                p10, k10c = a10.max(1), a10.argmax(1) + 1
-                if exact:
-                    pc = np.array([e[key] for e in ex]); kc = np.array([tidx(e["t" + key]) for e in ex])
-                else:
-                    pc, kc = p10, k10c
-                bad = int((pc > clim).sum())
-                st.append(PASS if bad == 0 else (WARN if vgrade else FAIL))
-                i = int(np.argmax(pc))
-                det.append(f"max {label} acceleration {pc.max():.3f} m/s2 [10 Hz: {p10.max():.3f}] vs limit {clim:g}; "
-                           f"{bad} drone(s) over; worst {show.drones[i].id} @ {t[kc[i]]:.1f} s"
-                           + (" (estimated from linear interpolation: corner spikes are artefacts, so WARN not FAIL)" if vgrade else ""))
-                if bad and not vgrade:
-                    for j in np.argsort(-pc)[:5]:
-                        if pc[j] > clim:
-                            pts.append((*P[j, kc[j], :2], f"{label} accel {pc[j]:.1f}"))
-            continue
-        if lmt is None:
-            st.append(WARN); det.append(f"no {name} limit in venue; max {peak.max():.2f} {unit}"); continue
-        order = np.argsort(-peak)[:5]
-        bad = int((peak > lmt).sum())
-        vis = show.grade != "flight" and name == "acceleration"
-        st.append(PASS if bad == 0 else (WARN if vis else FAIL))
-        det.append(f"max {name} {peak.max():.3f} {unit} [10 Hz: {peak10.max():.3f}] vs limit {lmt:g}; {bad} drone(s) over" +
-                   (" (estimated from linear interpolation: corner spikes are artefacts, so WARN not FAIL)" if vis else ""))
-        det.append(f"top 5 {name}: " + "; ".join(
-            f"{show.drones[i].id} {peak[i]:.2f} [{peak10[i]:.2f}] @ {t[kk[i]]:.1f} s" for i in order))
-        for i in order:
-            if peak[i] > lmt and not vis:
-                pts.append((*P[i, kk[i], :2], f"{name} {peak[i]:.1f}"))
-    summ = (f"max speed {sx['speed'][0].max():.2f} m/s [10 Hz {sp.max():.2f}], max accel {sx['acceleration'][0].max():.2f} m/s2 "
-            f"[10 Hz {ac.max():.2f}]") if exact else f"max speed {sp.max():.2f} m/s, max accel {ac.max():.2f} m/s2 (10 Hz)"
-    if exact and amax is not None:
-        # a velocity jump where two segments meet means unbounded acceleration; allow what amax gives in one 0.1 s tick
-        jl = amax / RATE_HZ
-        jb = np.where(jumps > jl)[0]
-        st.append(FAIL if len(jb) else PASS)
-        det.append(f"largest velocity jump at a segment join {jumps.max():.3f} m/s (allowed {jl:.2f} m/s = max accel x 0.1 s); "
-                   f"{len(jb)} drone(s) over" + (": " + ", ".join(f"{show.drones[i].id} {jumps[i]:.2f} m/s @ {ex[i]['tj']:.1f} s"
-                                                                     for i in jb[np.argsort(-jumps[jb])][:5]) if len(jb) else ""))
-        summ += f", max join jump {jumps.max():.2f} m/s"
-    elif exact and use_file_acc:
-        # same rule per component: allow what the file's XY / Z limit gives in one 0.1 s tick
-        for key, clim, label in [("jxy", fxy, "horizontal"), ("jz", fz, "vertical")]:
-            if clim is None:
-                continue
-            jc, jl = np.array([e[key] for e in ex]), clim / RATE_HZ
-            jb = np.where(jc > jl)[0]
-            st.append(FAIL if len(jb) else PASS)
-            det.append(f"largest {label} velocity jump at a segment join {jc.max():.3f} m/s (allowed {jl:.2f} m/s = "
-                       f"file limit x 0.1 s); {len(jb)} drone(s) over" + (": " + ", ".join(
-                           f"{show.drones[i].id} {jc[i]:.2f} m/s @ {ex[i]['t' + key]:.1f} s"
-                           for i in jb[np.argsort(-jc[jb])][:5]) if len(jb) else ""))
-        summ += f", max join jump {jumps.max():.2f} m/s"
+
+    # speed: derivative of the Bezier segments (.skyc); 10 Hz differences of the linear path (.vviz)
+    if all(d.segments is not None for d in show.drones):
+        ex = [drone_speeds(d.segments) for d in show.drones]
+        spd = {k: (np.array([e[k] for e in ex]), np.array([tidx(e["t" + k]) for e in ex]))
+               for k in ("v", "vxy", "vup", "vdown")}
+        det.append("speed from the derivative of the Bezier segments")
+    else:
+        v = np.diff(P, axis=1) * RATE_HZ
+        mags = {"v": np.linalg.norm(v, axis=2), "vxy": np.linalg.norm(v[..., :2], axis=2),
+                "vup": np.maximum(v[..., 2], 0), "vdown": np.maximum(-v[..., 2], 0)}
+        spd = {k: (m.max(1), m.argmax(1) + 1) for k, m in mags.items()}
+        det.append("speed from 10 Hz differences of the linearly interpolated path")
+
+    # acceleration: the path sampled at the controller rate, central differences (see dynamics.py)
+    ac = [acceleration_peaks(d.at, d.t_start, d.t_end, rate, float(t[0])) for d in show.drones]
+    acc = {k: (np.array([e[k] for e in ac]), np.array([tidx(e["t" + k]) for e in ac])) for k in ("a", "axy", "az")}
+    det.append(f"acceleration from the path sampled at {rate:g} Hz (the firmware's show control rate), central "
+               "differences for velocity and again for acceleration"
+               + ("; visualization-grade file: corners of the linear path read as spikes, so acceleration only WARNs"
+                  if vgrade else ""))
+
+    # venue limits: these can FAIL
+    for name, unit, pk, limit, src, level in [
+            ("speed", "m/s", spd["v"], lim.get("max_speed_mps"), "venue limits.max_speed_mps", FAIL),
+            ("acceleration", "m/s2", acc["a"], lim.get("max_accel_mps2"), "venue limits.max_accel_mps2",
+             WARN if vgrade else FAIL)]:
+        if limit is None:
+            st.append(WARN)
+            det.append(f"no {name} limit in venue: max {pk[0].max():.2f} {unit} not verified")
+        else:
+            _judge(name, unit, *pk, float(limit), src, level, show, ctx, det, pts, st)
+
+    # file levels (designer warnings): WARN only, never FAIL
+    up_key = "max_speed_z_up" if "max_speed_z_up" in flim else "max_speed_z"
+    for name, unit, pk, key, fname in [
+            ("horizontal speed", "m/s", spd["vxy"], "max_speed_xy", "maxVelocityXY"),
+            ("climb rate", "m/s", spd["vup"], up_key, "maxVelocityZUp" if up_key == "max_speed_z_up" else "maxVelocityZ"),
+            ("descent rate", "m/s", spd["vdown"], "max_speed_z", "maxVelocityZ"),
+            ("horizontal acceleration", "m/s2", acc["axy"], "max_accel_xy", "maxAccelerationXY"),
+            ("vertical acceleration", "m/s2", acc["az"], "max_accel_z", "maxAccelerationZ")]:
+        if flim.get(key) is not None:
+            _judge(name, unit, *pk, float(flim[key]), f"file settings.validation.{fname} (designer warning level)",
+                   WARN, show, ctx, det, pts, st, top=False)
+
+    summ = f"max speed {spd['v'][0].max():.2f} m/s, max accel {acc['a'][0].max():.2f} m/s2 ({rate:g} Hz path)"
     return Result("C4", "Speed and acceleration", worst(*st), summ, det, pts)
 
 
 # ------------------------------------------------------------ C5
 def c5_spacing(show, venue, ctx):
-    lim = venue["limits"].get("min_spacing_m")
+    lim = venue["limits"].get("min_spacing_m")                          # venue limit: can FAIL
+    flim = (getattr(show, "limits", None) or {}).get("min_spacing_m")   # file minDistance: designer warning level
     P, t = ctx["P"], ctx["t"]
     D, T = P.shape[:2]
     if D < 2:
         return Result("C5", "Closest pair", PASS, "single drone", [])
     # [DOC] Skybrush minNavAltitude: below it, neighbour distances are not checked (drones on or near the pads)
     nav, nav_src = pick_limit(show, venue, "min_nav_altitude_m", "min_nav_altitude_m", "minNavAltitude")
-    air = None if nav is None else (P[:, :, 2] - ctx["dz"]) >= nav     # (D, T): show Z above the show origin
+    if nav is None:
+        nav, nav_src = DEFAULT_MIN_NAV_ALTITUDE_M, "the default (Skybrush SHOW_TAKEOFF_ALT; neither file nor venue sets it)"
+    air = (P[:, :, 2] - ctx["dz"]) >= nav                     # (D, T): show Z above the show origin
     best = (np.inf, 0, 0, 0)
     step = max(1, int(4e6 // (D * D)))
     iu = np.triu_indices(D, 1)
     for k0 in range(0, T, step):
         X = P[:, k0:k0 + step].transpose(1, 0, 2)            # (s, D, 3)
         dd = np.linalg.norm(X[:, :, None] - X[:, None], axis=3)[:, iu[0], iu[1]]
-        if air is not None:
-            A = air[:, k0:k0 + step].T                         # (s, D)
-            dd = np.where(A[:, iu[0]] & A[:, iu[1]], dd, np.inf)
+        A = air[:, k0:k0 + step].T                             # (s, D)
+        dd = np.where(A[:, iu[0]] & A[:, iu[1]], dd, np.inf)
         j = np.unravel_index(np.argmin(dd), dd.shape)
         if dd[j] < best[0]:
             best = (float(dd[j]), k0 + j[0], iu[0][j[1]], iu[1][j[1]])
-    if air is None:
-        nav_det = "no minNavAltitude in the file or venue: every pair checked at every 10 Hz frame"
-    else:
-        n_air = air.sum(0)
-        total, checked = T * (D * (D - 1) // 2), int((n_air * (n_air - 1) // 2).sum())
-        nav_det = (f"minNavAltitude {nav:g} m from {nav_src}: skipped {total - checked:,} of {total:,} pair-samples "
-                   f"in {int((n_air < D).sum())} of {T} frames (10 Hz), because one or both drones were below {nav:g} m "
-                   f"above the show origin (Skybrush does not check neighbour distances there)")
+    n_air = air.sum(0)
+    total, checked = T * (D * (D - 1) // 2), int((n_air * (n_air - 1) // 2).sum())
+    nav_det = (f"minNavAltitude {nav:g} m from {nav_src}: skipped {total - checked:,} of {total:,} pair-samples "
+               f"in {int((n_air < D).sum())} of {T} frames (10 Hz), because one or both drones were below {nav:g} m "
+               f"above the show origin (Skybrush does not check neighbour distances there)")
     d, k, a, b = best
     if not np.isfinite(d):
         return Result("C5", "Closest pair", WARN, f"no pair above minNavAltitude {nav:g} m: nothing checked",
                       [nav_det], [])
-    ok = lim is None or d >= lim
     det = [f"closest pair {show.drones[a].id} / {show.drones[b].id}: {d:.2f} m (3-D) at t={t[k]:.1f} s, "
-           f"E {P[a, k, 0]:.1f} N {P[a, k, 1]:.1f} alt {P[a, k, 2]:.1f} m" + (f"; limit {lim:g} m" if lim else "; no limit in venue"),
-           nav_det]
-    pts = [] if ok else [((P[a, k, 0] + P[b, k, 0]) / 2, (P[a, k, 1] + P[b, k, 1]) / 2, f"pair {d:.2f} m")]
-    st = WARN if lim is None else (PASS if ok else FAIL)
-    return Result("C5", "Closest pair", st, f"{d:.2f} m ({show.drones[a].id}/{show.drones[b].id} @ {t[k]:.1f} s)", det, pts)
+           f"E {P[a, k, 0]:.1f} N {P[a, k, 1]:.1f} alt {P[a, k, 2]:.1f} m", nav_det]
+    st = []
+    if lim is None:
+        st.append(WARN); det.append("no min_spacing_m in venue: closest pair not verified")
+    else:
+        st.append(PASS if d >= lim else FAIL)
+        det.append(f"venue limits.min_spacing_m {lim:g} m: " + ("ok" if d >= lim else "FAIL"))
+    if flim is not None:
+        st.append(PASS if d >= flim else WARN)
+        det.append(f"file settings.validation.minDistance {flim:g} m (designer warning level): "
+                   + ("ok" if d >= flim else "WARN"))
+    pts = [] if lim is None or d >= lim else [((P[a, k, 0] + P[b, k, 0]) / 2, (P[a, k, 1] + P[b, k, 1]) / 2, f"pair {d:.2f} m")]
+    return Result("C5", "Closest pair", worst(*st), f"{d:.2f} m ({show.drones[a].id}/{show.drones[b].id} @ {t[k]:.1f} s)",
+                  det, pts)
 
 
-def run_checks(show, venue, expected_manifest=None):
+def run_checks(show, venue, expected_manifest=None, ctrl_rate=None):
+    """Run C1-C6. ctrl_rate: Hz at which C4 samples the path for acceleration (default dynamics.CTRL_RATE_HZ, 10)."""
     from .fingerprint import c6_result
+    from .dynamics import CTRL_RATE_HZ, CTRL_RATE_RANGE
     ctx = prepare(show, venue)
+    ctx["ctrl_rate"] = CTRL_RATE_HZ if ctrl_rate is None else float(ctrl_rate)
+    lo, hi = CTRL_RATE_RANGE
+    if not lo <= ctx["ctrl_rate"] <= hi:
+        raise ValueError(f"control rate {ctx['ctrl_rate']:g} Hz is outside {lo:g}-{hi:g} Hz (Skybrush SHOW_CTRL_RATE range)")
     res = [f(show, venue, ctx) for f in (c1_origin, c2_crowd, c3_fence, c4_dynamics, c5_spacing)]
     res.append(c6_result(show, expected_manifest))
     return res, ctx

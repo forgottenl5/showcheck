@@ -149,7 +149,8 @@ def read_skyc(path, limits=None) -> Show:
             notes.append(f"{no_takeoff} drone(s) have no takeoffTime; treated as 0 (Skybrush schema default).")
         if shifted:
             notes.append("trajectory times shifted by takeoffTime (show time = t + takeoffTime) [confirmed by real export].")
-        notes.append("trajectories evaluated exactly from the Bezier segments, sampled at 10 Hz.")
+        notes.append("positions evaluated on the Bezier segments and sampled at 10 Hz; C4 acceleration uses the path "
+                     "sampled at the show control rate, not the segments' second derivatives.")
     show = Show(str(path), "skyc", "flight", drones, origin, heading, handed, fence, limits, notes)
     check_show(show, lim)
     return show

@@ -18,8 +18,8 @@ report with a top-view picture, and a fingerprint manifest.
 | **C1 Placement** | The show's origin and heading match the venue plan, and every drone's home is on its assigned pad. |
 | **C2 Crowd distance** | No drone comes closer to a crowd area than that area's buffer. |
 | **C3 Geofence** | The file's fence matches the venue fence, every drone stays inside it with the buffer margin, and maximum altitude is within the limit. |
-| **C4 Speed and acceleration** | Max speed and acceleration are within the venue limits (or, for acceleration, the file's own `maxAccelerationXY/Z` if the venue sets none). For `.skyc` files they are computed exactly from the curves; the 10 Hz sampled values are shown alongside. |
-| **C5 Spacing** | The closest approach between any two drones is at least the minimum spacing. Pairs where either drone is below `minNavAltitude` (from the file or the venue) are skipped, as Skybrush does; the report says how many. |
+| **C4 Speed and acceleration** | Max speed and acceleration are within the venue limits. Speed comes from the derivative of the `.skyc` curves. Acceleration comes from the path sampled at the drone's show control rate (10 Hz by default, `--ctrl-rate` 1-50), using central differences, because the firmware follows the show at that rate and tiny segments in real exports would otherwise give meaningless spikes. The file's own `settings.validation` levels (`maxVelocityXY/Z/ZUp`, `maxAccelerationXY/Z`) are designer warnings: they can WARN, never FAIL. |
+| **C5 Spacing** | The closest approach between any two drones is at least the venue's minimum spacing (FAIL), and at least the file's `minDistance` (WARN only). Pairs where either drone is below `minNavAltitude` are skipped, as Skybrush does. The value comes from the venue, else the file, else 2.5 m (Skybrush's default takeoff altitude). The report says which was used and how many pair-samples were skipped. |
 | **C6 Fingerprint** | One SHA-256 per drone (trajectory and lights) plus the placement, to compare with what each drone actually received. |
 
 ## Quick start

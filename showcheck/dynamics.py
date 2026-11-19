@@ -1,39 +1,45 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 forgottenl5
-"""Exact (analytic) speed and acceleration of Bezier trajectories.
+"""Speed of Bezier trajectories, and acceleration of the path as the drone's controller follows it.
 
-Each segment is B(u), u = (t - t0)/dt in [0, 1], so velocity = B'(u)/dt and acceleration = B''(u)/dt^2.
-- straight: B' constant, B'' = 0
-- quadratic: B' linear in u (max |B'| at an end), B'' constant
-- cubic: B' quadratic in u: max |B'| is at an end or where d|B'|^2/du = 0 (a cubic, solved exactly);
-         B'' linear in u, so max |B''| is at an end.
-Where two segments meet with different velocities the acceleration is unbounded (an impulse); those
-velocity jumps are reported separately.
+Speed (.skyc): each segment is B(u), u = (t - t0)/dt in [0, 1], so velocity = B'(u)/dt.
+- straight: B' constant;  quadratic: B' linear in u;  cubic: B' quadratic in u, so max |B'| is at an end or where
+  d|B'|^2/du = 0 (a cubic in u).  The same works for the horizontal part alone; the vertical part is a quadratic.
+
+Acceleration is NOT taken from the segments' second derivatives. Real exports contain many tiny segments
+(a few hundredths of a second) whose B''/dt^2 is huge but meaningless: the firmware never flies a segment on its own.
+It follows the show with position + velocity targets at a fixed rate (Skybrush SHOW_CTRL_RATE, 10 Hz by default,
+range 1-50) with feed-forward, so it sees the path only at those instants. Here the path is sampled at that rate
+and differentiated with central differences twice:
+    v_k = (p_{k+1} - p_{k-1}) / 2h,    a_k = (v_{k+1} - v_{k-1}) / 2h,    h = 1 / rate.
+A velocity step of dv in the file then reads as dv / 2h, not as an infinite impulse.
 """
 import numpy as np
 
+CTRL_RATE_HZ = 10.0          # Skybrush firmware SHOW_CTRL_RATE default
+CTRL_RATE_RANGE = (1.0, 50.0)
 
-def _deriv(cp):
-    """Return (velocity coefficients a2, a1, a0 for u^2, u, 1) and (acceleration at u=0, u=1), in per-unit-u terms."""
+
+def _vel_coeffs(cp):
+    """B'(u) = a u^2 + b u + c (per unit u) for 2, 3 or 4 control points of any dimension."""
     n = len(cp) - 1
+    z = np.zeros(cp.shape[1])
     if n == 1:
-        q = cp[1] - cp[0]
-        z = np.zeros(3)
-        return (z, z, q), (z, z)
+        return z, z, cp[1] - cp[0]
     if n == 2:
         p0, p1, p2 = cp
-        return (np.zeros(3), 2 * (p2 - 2 * p1 + p0), 2 * (p1 - p0)), (2 * (p2 - 2 * p1 + p0),) * 2
+        return z, 2 * (p2 - 2 * p1 + p0), 2 * (p1 - p0)
     p0, p1, p2, p3 = cp
     q0, q1, q2 = p1 - p0, p2 - p1, p3 - p2
-    return (3 * (q0 - 2 * q1 + q2), 6 * (q1 - q0), 3 * q0), (6 * (q1 - q0), 6 * (q2 - q1))
+    return 3 * (q0 - 2 * q1 + q2), 6 * (q1 - q0), 3 * q0
 
 
-def segment_extremes(t0, t1, cp):
-    """(max speed, t of max speed, max |acc|, t of max acc, v(start), v(end)) for one segment."""
+def segment_max_speed(t0, t1, cp):
+    """(max |velocity|, t of it) over one segment. cp: (n, k) control points incl. both ends, any k (3-D, xy, ...)."""
     dt = t1 - t0
-    (a, b, c), (acc0, acc1) = _deriv(np.asarray(cp, float))
     if dt <= 0:
-        return 0.0, t0, 0.0, t0, np.zeros(3), np.zeros(3)
+        return 0.0, t0
+    a, b, c = _vel_coeffs(np.asarray(cp, float))
     # |B'(u)|^2 = |a u^2 + b u + c|^2 ; stationary points: (a u^2 + b u + c) . (2 a u + b) = 0
     coeffs = [2 * a @ a, 3 * a @ b, b @ b + 2 * a @ c, b @ c]
     while coeffs and abs(coeffs[0]) < 1e-15:
@@ -44,49 +50,61 @@ def segment_extremes(t0, t1, cp):
     u = np.array(cand)
     sp = np.linalg.norm(np.outer(u * u, a) + np.outer(u, b) + c, axis=1) / dt
     i = int(np.argmax(sp))
-    acc = np.array([np.linalg.norm(acc0), np.linalg.norm(acc1)]) / dt**2
-    j = int(np.argmax(acc))
-    return float(sp[i]), t0 + u[i] * dt, float(acc[j]), t0 + j * dt, c / dt, (a + b + c) / dt
+    return float(sp[i]), t0 + u[i] * dt
 
 
-def drone_extremes(segments):
-    """Max speed / acceleration over a drone's segments, plus the largest velocity jump at a segment join.
+def segment_z_range(t0, t1, cp):
+    """(max vertical velocity (up, >= 0), t, max descent rate (>= 0), t) over one segment."""
+    dt = t1 - t0
+    if dt <= 0:
+        return 0.0, t0, 0.0, t0
+    a, b, c = (x[2] for x in _vel_coeffs(np.asarray(cp, float)))
+    cand = [0.0, 1.0] + ([-b / (2 * a)] if abs(a) > 1e-15 and 0 < -b / (2 * a) < 1 else [])
+    u = np.array(cand)
+    vz = (a * u * u + b * u + c) / dt
+    i, j = int(np.argmax(vz)), int(np.argmin(vz))
+    return max(float(vz[i]), 0.0), t0 + u[i] * dt, max(float(-vz[j]), 0.0), t0 + u[j] * dt
 
-    Also the horizontal (xy) and vertical (z) parts separately: "axy"/"az" (acceleration is linear in u, so each
-    component's maximum is at a segment end) and "jxy"/"jz" (velocity jumps at joins).
-    """
-    best = {"v": 0.0, "tv": 0.0, "a": 0.0, "ta": 0.0, "jump": 0.0, "tj": 0.0,
-            "axy": 0.0, "taxy": 0.0, "az": 0.0, "taz": 0.0, "jxy": 0.0, "tjxy": 0.0, "jz": 0.0, "tjz": 0.0}
 
-    def comp(vec, t, a_key, t_key, z_key, tz_key):
-        h, z = float(np.linalg.norm(vec[:2])), float(abs(vec[2]))
-        if h > best[a_key]:
-            best.update({a_key: h, t_key: t})
-        if z > best[z_key]:
-            best.update({z_key: z, tz_key: t})
-
-    prev_end = np.zeros(3)                                      # drone is at rest before the first point
+def drone_speeds(segments):
+    """Max speed over a drone's segments: 3-D ("v"), horizontal ("vxy"), climb ("vup") and descent ("vdown"), with times."""
+    best = {k: 0.0 for k in ("v", "tv", "vxy", "tvxy", "vup", "tvup", "vdown", "tvdown")}
     for t0, t1, cp in segments:
-        v, tv, acc, ta, vs, ve = segment_extremes(t0, t1, cp)
         if t1 <= t0:
             continue
-        if v > best["v"]:
-            best.update(v=v, tv=tv)
-        if acc > best["a"]:
-            best.update(a=acc, ta=ta)
-        dt2 = (t1 - t0) ** 2
-        _, (acc0, acc1) = _deriv(np.asarray(cp, float))
-        comp(acc0 / dt2, t0, "axy", "taxy", "az", "taz")
-        comp(acc1 / dt2, t1, "axy", "taxy", "az", "taz")
-        jv = vs - prev_end
-        jump = float(np.linalg.norm(jv))
-        if jump > best["jump"]:
-            best.update(jump=jump, tj=t0)
-        comp(jv, t0, "jxy", "tjxy", "jz", "tjz")
-        prev_end = ve
-    jump = float(np.linalg.norm(prev_end))                      # and at rest after the last point
-    if segments:
-        if jump > best["jump"]:
-            best.update(jump=jump, tj=segments[-1][1])
-        comp(prev_end, segments[-1][1], "jxy", "tjxy", "jz", "tjz")
+        cp = np.asarray(cp, float)
+        for key, (val, tt) in (("v", segment_max_speed(t0, t1, cp)), ("vxy", segment_max_speed(t0, t1, cp[:, :2]))):
+            if val > best[key]:
+                best[key], best["t" + key] = val, tt
+        up, tu, down, td = segment_z_range(t0, t1, cp)
+        if up > best["vup"]:
+            best["vup"], best["tvup"] = up, tu
+        if down > best["vdown"]:
+            best["vdown"], best["tvdown"] = down, td
     return best
+
+
+def sampled_acceleration(at, t_start, t_end, rate=CTRL_RATE_HZ, t_ref=0.0):
+    """Acceleration of one drone's path sampled at `rate` Hz (central differences twice, see module docstring).
+
+    The grid is t_ref + k / rate and runs two samples past each end, so starting from and stopping to rest counts.
+    Returns (times (N,), acceleration vectors (N, 3)).
+    """
+    h = 1.0 / rate
+    k0 = int(np.floor((t_start - t_ref) * rate)) - 2
+    k1 = int(np.ceil((t_end - t_ref) * rate)) + 2
+    t = t_ref + np.arange(k0, k1 + 1) * h
+    p = at(t)
+    v = (p[2:] - p[:-2]) / (2 * h)                    # at t[1:-1]
+    a = (v[2:] - v[:-2]) / (2 * h)                    # at t[2:-2]
+    return t[2:-2], a
+
+
+def acceleration_peaks(at, t_start, t_end, rate=CTRL_RATE_HZ, t_ref=0.0):
+    """Max |a| 3-D ("a"), horizontal ("axy") and vertical ("az") of one drone, with times ("ta", "taxy", "taz")."""
+    t, a = sampled_acceleration(at, t_start, t_end, rate, t_ref)
+    out = {}
+    for key, mag in (("a", np.linalg.norm(a, axis=1)), ("axy", np.linalg.norm(a[:, :2], axis=1)), ("az", np.abs(a[:, 2]))):
+        i = int(np.argmax(mag)) if len(mag) else 0
+        out[key], out["t" + key] = (float(mag[i]), float(t[i])) if len(mag) else (0.0, t_start)
+    return out

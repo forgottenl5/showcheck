@@ -60,7 +60,7 @@ def test_near_pass_08m(tmp_path):
     assert d < 0.8 and "drone_001/drone_002" in v["C5"].summary
 
 
-def test_bezier_reader_exact(tmp_path):
+def test_bezier_reader_positions(tmp_path):
     """Ease segment from (r,0) to (r,h) over 10 s: z(5 s) = h/2, z(2.5 s) = h*(3u^2-2u^3)."""
     show = read_skyc(synth.write_skyc(str(tmp_path / "c.skyc"), "clean"))
     d = show.drones[0]
@@ -93,7 +93,7 @@ def test_official_skybrush_fixture_reads():
 
 
 # ---------------------------------------------------------------- step 2
-from showcheck.dynamics import segment_extremes, drone_extremes   # noqa: E402
+from showcheck.dynamics import segment_max_speed, sampled_acceleration   # noqa: E402
 from showcheck.fingerprint import manifest, compare                # noqa: E402
 from showcheck import cli                                          # noqa: E402
 
@@ -124,25 +124,45 @@ def test_one_to_one_matching_is_not_nearest_pad():
     assert r.status == "FAIL" and "1 drone(s) off-pad" in r.summary
 
 
-def test_analytic_dynamics_ease_segment():
-    # ease segment 28 m in 10 s: v_max = 1.5 D/T at mid, a_max = 6 D/T^2 at the ends
+def test_bezier_speed_ease_segment():
+    # ease segment 28 m in 10 s: v_max = 1.5 D/T at mid
     cp = np.array([[0, 0, 0], [0, 0, 0], [28, 0, 0], [28, 0, 0]], float)
-    v, tv, a, ta, vs, ve = segment_extremes(0, 10, cp)
-    assert v == pytest.approx(4.2) and tv == pytest.approx(5.0) and a == pytest.approx(1.68)
-    assert np.allclose(vs, 0) and np.allclose(ve, 0)
+    v, tv = segment_max_speed(0, 10, cp)
+    assert v == pytest.approx(4.2) and tv == pytest.approx(5.0)
 
 
-def test_analytic_vs_sampled_on_clean_show(tmp_path):
+def test_sampled_acceleration_of_ease_segment():
+    # x = D (3u^2 - 2u^3): a = 6 D/T^2 at the ends; central differences at 10 Hz read it slightly lower, never higher
+    D, T = 28.0, 10.0
+    at = lambda t: np.stack([D * (3 * np.clip(t / T, 0, 1) ** 2 - 2 * np.clip(t / T, 0, 1) ** 3), 0 * t, 0 * t], -1)
+    t, a = sampled_acceleration(at, 0.0, T, 10.0)
+    peak = np.abs(a[:, 0]).max()
+    assert 0.9 * 6 * D / T**2 < peak <= 6 * D / T**2 + 1e-9
+    assert np.allclose(a[(t > 0.5) & (t < 9.5), 0], 6 * D / T**2 * (1 - 2 * t[(t > 0.5) & (t < 9.5)] / T), atol=1e-9)
+
+
+def test_c4_summary_on_clean_show(tmp_path):
     v = verdicts(tmp_path, "clean")
-    s = v["C4"].summary            # exact max accel is 6*20/8^2 = 1.875 (rise to 30 m); 10 Hz sampling under-reads it
-    assert "max accel 1.88 m/s2 [10 Hz 1.83]" in s and "max speed 4.20 m/s" in s and "max join jump 0.00" in s
+    assert v["C4"].status == "PASS"
+    assert v["C4"].summary == "max speed 4.20 m/s, max accel 1.78 m/s2 (10 Hz path)", v["C4"].summary
 
 
-def test_velocity_jump_reported_for_linear_spike(tmp_path):
+def test_velocity_step_reads_as_finite_acceleration(tmp_path):
+    # linear spike: a 13.33 m/s step reads as dv / 2h at 10 Hz, about 133 m/s2 (over the venue's 4), not infinite
     v = verdicts(tmp_path, "speed_spike")
-    j = next(d for d in v["C4"].details if d.startswith("largest velocity jump"))
-    import re
-    assert "1 drone(s) over: drone_001" in j and float(re.search(r"join ([\d.]+) m/s", j).group(1)) > 13
+    a = next(d for d in v["C4"].details if d.startswith("max acceleration"))
+    assert v["C4"].status == "FAIL" and "venue limits.max_accel_mps2 4" in a and "worst drone_001" in a
+    assert "max accel 133.33 m/s2" in v["C4"].summary
+
+
+def test_ctrl_rate_is_configurable_and_bounded(tmp_path):
+    show = read_skyc(synth.write_skyc(str(tmp_path / "c.skyc"), "clean"))
+    ven = load_venue(synth.venue_dict())
+    r = {x.id: x for x in run_checks(show, ven, ctrl_rate=25)[0]}
+    assert "(25 Hz path)" in r["C4"].summary and any("sampled at 25 Hz" in d for d in r["C4"].details)
+    for bad in (0.5, 51):
+        with pytest.raises(ValueError):
+            run_checks(show, ven, ctrl_rate=bad)
 
 
 def test_manifest_and_compare(tmp_path):
@@ -284,8 +304,8 @@ def test_c5_skips_pairs_below_min_nav_altitude(tmp_path):
     ven = load_venue(synth.venue_dict())                       # min_spacing_m 2.0
     plain = read_skyc(_skyc(tmp_path, _ground_close_air_apart(), name="plain.skyc"))
     r = c5_spacing(plain, ven, prepare(plain, ven))
-    assert r.status == "FAIL" and r.summary.startswith("0.50 m")       # no minNavAltitude: pads count, as before
-    assert any("no minNavAltitude" in d for d in r.details)
+    assert r.status == "PASS" and r.summary.startswith("6.00 m")       # no minNavAltitude anywhere: default 2.5 m
+    assert any(d.startswith("minNavAltitude 2.5 m from the default") for d in r.details), r.details
 
     show = read_skyc(_skyc(tmp_path, _ground_close_air_apart(), {"minNavAltitude": 2.5}))
     assert show.limits["min_nav_altitude_m"] == 2.5
@@ -306,22 +326,78 @@ def test_c5_skips_pairs_below_min_nav_altitude(tmp_path):
     assert r.status == "WARN" and "nothing checked" in r.summary
 
 
-def test_file_acceleration_limits_used_when_venue_has_none(tmp_path):
-    from showcheck.checks import c4_dynamics, prepare
+def test_file_validation_limits_only_warn(tmp_path):
+    """settings.validation levels are the designer's warnings: a breach is WARN, never FAIL. Venue limits FAIL."""
+    from showcheck.checks import c4_dynamics, c5_spacing, prepare
     show = read_skyc(_skyc(tmp_path, _ground_close_air_apart(),
-                           {"maxAccelerationXY": 6.0, "maxAccelerationZ": 1.0, "minNavAltitude": 2.5}))
+                           {"maxAccelerationXY": 6.0, "maxAccelerationZ": 1.0, "maxVelocityXY": 0.5,
+                            "maxVelocityZ": 1.0, "minDistance": 8.0, "minNavAltitude": 2.5}))
     assert show.limits["max_accel_xy"] == 6.0 and show.limits["max_accel_z"] == 1.0
-    ven = load_venue(synth.venue_dict())                       # venue max_accel_mps2 4.0 wins
+    ven = load_venue(synth.venue_dict())                       # venue: speed 8, accel 10, spacing 2 - all met
+    ven["limits"]["max_accel_mps2"] = 10.0                     # straight segments: ~6.9 m/s2 at the corners (10 Hz)
     r = c4_dynamics(show, ven, prepare(show, ven))
-    assert any("venue limits.max_accel_mps2 4 m/s2 (3-D) used; file maxAccelerationXY 6 / maxAccelerationZ 1" in d
-               for d in r.details), r.details
-    ven["limits"].pop("max_accel_mps2")
+    assert r.status == "WARN" and not r.points, r.details
+    lines = {d.split(" vs ")[0]: d for d in r.details if d.startswith("max ")}
+    assert "(WARN)" in lines["max horizontal speed 1.000 m/s"]         # 3 m in 3 s > 0.5
+    assert "(WARN)" in lines["max climb rate 1.286 m/s"]               # 9 m in 7 s > 1.0
+    assert "(WARN)" in next(v for k, v in lines.items() if k.startswith("max vertical acceleration"))
+    assert "0 drone(s) over" in next(v for k, v in lines.items() if k.startswith("max acceleration"))
+    assert all("designer warning level" in v for k, v in lines.items() if "horizontal" in k or "vertical" in k)
+
+    r5 = c5_spacing(show, ven, prepare(show, ven))             # 6 m apart in the air: venue 2 m ok, file 8 m breached
+    assert r5.status == "WARN" and r5.summary.startswith("6.00 m") and not r5.points
+    assert any(d.startswith("file settings.validation.minDistance 8 m (designer warning level): WARN") for d in r5.details)
+
+    ven["limits"]["max_speed_mps"] = 1.0                       # the same show against a venue limit: FAIL
+    assert c4_dynamics(show, ven, prepare(show, ven)).status == "FAIL"
+    ven["limits"]["min_spacing_m"] = 7.0
+    assert c5_spacing(show, ven, prepare(show, ven)).status == "FAIL"
+
+
+def test_default_min_nav_altitude_skips_ground_pairs(tmp_path):
+    from showcheck.checks import c5_spacing, prepare, DEFAULT_MIN_NAV_ALTITUDE_M
+    assert DEFAULT_MIN_NAV_ALTITUDE_M == 2.5
+    show = read_skyc(_skyc(tmp_path, _ground_close_air_apart()))        # 0.5 m apart on the pads, 6 m in the air
+    assert "min_nav_altitude_m" not in show.limits
+    ven = load_venue(synth.venue_dict())
+    assert "min_nav_altitude_m" not in ven["limits"]
+    r = c5_spacing(show, ven, prepare(show, ven))
+    nav = next(d for d in r.details if d.startswith("minNavAltitude"))
+    assert r.status == "PASS" and r.summary.startswith("6.00 m") and "below 2.5 m" in nav and "default" in nav
+    frames = int(nav.split(" frames")[0].split(" in ")[-1].split(" of ")[0])
+    assert 90 <= frames <= 95, nav
+
+
+def _tiny_segment_path(seg_dt=0.022, wiggle=0.002):
+    """A smooth 30 m ease move in 10 s, exported as cubic segments of seg_dt seconds whose inner control points sit
+    `wiggle` m off the curve, alternating sides - like real exports with tiny segments. Per-segment B''/dt^2 is huge."""
+    T, D = 10.0, 30.0
+    x = lambda t: D * (3 * (t / T) ** 2 - 2 * (t / T) ** 3)
+    ts = np.arange(0, T + 1e-9, seg_dt)
+    if ts[-1] < T:
+        ts = np.append(ts, T)
+    pts = [[0.0, [0.0, 0.0, 10.0], []]]
+    for i in range(1, len(ts)):
+        t0, t1 = ts[i - 1], ts[i]
+        w = wiggle * (1 if i % 2 else -1)
+        c1, c2 = x(t0 + (t1 - t0) / 3), x(t0 + 2 * (t1 - t0) / 3)
+        pts.append([float(t1), [x(t1), 0.0, 10.0], [[c1, w, 10.0], [c2, -w, 10.0]]])
+    return pts
+
+
+def test_tiny_segments_give_sane_acceleration(tmp_path):
+    from showcheck.checks import c4_dynamics, prepare
+    pts = _tiny_segment_path()
+    # what per-segment Bezier second derivatives would claim: 6 * |p0 - 2 p1 + p2| / dt^2 at a segment start
+    p0 = np.array(pts[1][1]); p1, p2 = np.array(pts[2][2][0]), np.array(pts[2][2][1])
+    bezier = 6 * np.linalg.norm(p0 - 2 * p1 + p2) / (pts[2][0] - pts[1][0]) ** 2
+    assert bezier > 50                                        # non-physical
+    show = read_skyc(_skyc(tmp_path, [{"name": "a", "home": [0, 0, 10], "trajectory": _traj(pts, takeoffTime=0)}]))
+    ven = load_venue(synth.venue_dict())                      # venue max_accel_mps2 4
     r = c4_dynamics(show, ven, prepare(show, ven))
-    assert any("file settings.validation maxAccelerationXY 6 / maxAccelerationZ 1 m/s2 used" in d for d in r.details)
-    # straight segments: the 1.29 m/s climb stops dead at 15 s, a vertical jump over the 0.1 m/s allowed (1.0 x 0.1 s)
-    vj = next(d for d in r.details if d.startswith("largest vertical velocity jump"))
-    assert "2 drone(s) over" in vj and r.status == "FAIL"
-    assert any(d.startswith("max horizontal acceleration") for d in r.details)
+    peak = float(r.summary.split("max accel ")[1].split(" m/s2")[0])
+    assert peak < 2.0, r.summary                              # true peak 6 * 30 / 10^2 = 1.8 m/s2
+    assert r.status == "PASS", r.details
 
 
 def test_drone_without_lights(tmp_path):

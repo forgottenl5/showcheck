@@ -2,7 +2,7 @@
 # Copyright (c) 2026 forgottenl5
 """Command line.
 
-  python -m showcheck.cli SHOW --venue VENUE.json [--out DIR] [--name NAME] [--expect MANIFEST.json]
+  python -m showcheck.cli SHOW --venue VENUE.json [--out DIR] [--name NAME] [--expect MANIFEST.json] [--ctrl-rate HZ]
       run C1-C6, write NAME.html, NAME.png and NAME.manifest.json; exit 1 if any FAIL
   python -m showcheck.cli compare A.manifest.json B.manifest.json
       list drones whose trajectory / lights / pyro hashes differ or that are missing; exit 1 if anything differs
@@ -138,6 +138,9 @@ def cmd_check(argv):
     ap.add_argument("--out", default="reports")
     ap.add_argument("--name", default=None)
     ap.add_argument("--expect", default=None, help="manifest to compare against (C6 FAILs on any difference)")
+    ap.add_argument("--ctrl-rate", type=float, default=None, metavar="HZ",
+                    help="rate at which C4 samples the path for acceleration, as the drone's show controller does "
+                         "(Skybrush SHOW_CTRL_RATE; default 10, range 1-50)")
     L.add_arguments(ap)
     a = ap.parse_args(argv)
     L.apply_arguments(a)
@@ -147,7 +150,7 @@ def cmd_check(argv):
         expected = _load(load_json_file, a.expect) if a.expect else None
         if expected is not None and not (isinstance(expected, dict) and isinstance(expected.get("drones"), list)):
             raise LimitError(f"{os.path.basename(a.expect)}: not a ShowCheck manifest")
-        results, ctx = run_checks(show, venue, expected)
+        results, ctx = run_checks(show, venue, expected, a.ctrl_rate)
         name = a.name or os.path.splitext(os.path.basename(a.show))[0]
         page, png, overall = write_report(show, venue, results, ctx, a.out, name)
     finally:

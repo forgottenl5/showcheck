@@ -37,12 +37,13 @@ The venue file is ShowCheck's own format. It describes the real site, independen
 | `geofence.polygon` | no | Inclusion polygon `[east, north]` | C3 |
 | `geofence.buffer_m` | no (0) | Drones must stay at least this far inside the fence | C3 |
 | `limits.max_speed_mps` | no | 3-D speed limit | C4 |
-| `limits.max_accel_mps2` | no | 3-D acceleration limit. If not set, a `.skyc` file's own `maxAccelerationXY` / `maxAccelerationZ` are checked instead (horizontal and vertical parts); the report says which was used. | C4 |
-| `limits.min_spacing_m` | no | Minimum 3-D distance between any two drones at any time | C5 |
+| `limits.max_accel_mps2` | no | 3-D acceleration limit, checked on the path sampled at the show control rate (`--ctrl-rate`, default 10 Hz) with central differences. A `.skyc` file's own `maxAccelerationXY` / `maxAccelerationZ` (and `maxVelocityXY` / `Z` / `ZUp`) are always checked too, but only as designer warning levels: they can WARN, never FAIL. | C4 |
+| `limits.min_spacing_m` | no | Minimum 3-D distance between any two drones at any time (FAIL). A `.skyc` file's own `minDistance` is also checked, as a warning level only (WARN). | C5 |
 | `limits.max_altitude_m` | no | Ceiling above the origin altitude | C3 |
-| `limits.min_nav_altitude_m` | no | C5 skips any pair where either drone is below this height, in metres of show Z above the show origin (same meaning as Skybrush `minNavAltitude`). If not set, a `.skyc` file's own `minNavAltitude` is used; if neither is set, every pair is checked. The report says which was used and how many pair-samples were skipped. | C5 |
+| `limits.min_nav_altitude_m` | no | C5 skips any pair where either drone is below this height, in metres of show Z above the show origin (same meaning as Skybrush `minNavAltitude`). If not set, a `.skyc` file's own `minNavAltitude` is used. If neither is set, 2.5 m is used (Skybrush firmware's default `SHOW_TAKEOFF_ALT`). Set it to 0 to check every pair. The report says which was used and how many pair-samples were skipped. | C5 |
 
 **Notes**
 - A missing limit or area makes that part of the check **WARN** ("not checked") rather than PASS.
+- Only venue limits can FAIL. Limits in the show file's `settings.validation` are the designer's warning levels and can only WARN.
 - Polygons may be listed clockwise or counter-clockwise. They must not self-intersect.
 - The venue is the source of truth. The show is placed into it using the **show file's own origin and heading**; the venue's values are used only when the file has none, and the report says when that happened.
