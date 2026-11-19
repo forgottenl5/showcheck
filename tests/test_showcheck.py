@@ -144,7 +144,7 @@ def test_sampled_acceleration_of_ease_segment():
 def test_c4_summary_on_clean_show(tmp_path):
     v = verdicts(tmp_path, "clean")
     assert v["C4"].status == "PASS"
-    assert v["C4"].summary == "max speed 4.20 m/s, max accel 1.78 m/s2 (10 Hz path)", v["C4"].summary
+    assert v["C4"].summary == "max speed 4.20 m/s, max accel 1.78 m/s2 " + "(accel: 10 Hz sampled positions, central difference of central-difference velocity; values depend on rate (--ctrl-rate))", v["C4"].summary
 
 
 def test_velocity_step_reads_as_finite_acceleration(tmp_path):
@@ -159,7 +159,7 @@ def test_ctrl_rate_is_configurable_and_bounded(tmp_path):
     show = read_skyc(synth.write_skyc(str(tmp_path / "c.skyc"), "clean"))
     ven = load_venue(synth.venue_dict())
     r = {x.id: x for x in run_checks(show, ven, ctrl_rate=25)[0]}
-    assert "(25 Hz path)" in r["C4"].summary and any("sampled at 25 Hz" in d for d in r["C4"].details)
+    assert "(accel: 25 Hz sampled positions" in r["C4"].summary and any("sampled at 25 Hz" in d for d in r["C4"].details)
     for bad in (0.5, 51):
         with pytest.raises(ValueError):
             run_checks(show, ven, ctrl_rate=bad)

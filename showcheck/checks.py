@@ -265,7 +265,8 @@ def c4_dynamics(show, venue, ctx):
             _judge(name, unit, *pk, float(flim[key]), f"file settings.validation.{fname} (designer warning level)",
                    WARN, show, ctx, det, pts, st, top=False)
 
-    summ = f"max speed {spd['v'][0].max():.2f} m/s, max accel {acc['a'][0].max():.2f} m/s2 ({rate:g} Hz path)"
+    summ = (f"max speed {spd['v'][0].max():.2f} m/s, max accel {acc['a'][0].max():.2f} m/s2 (accel: {rate:g} Hz sampled "
+            "positions, central difference of central-difference velocity; values depend on rate (--ctrl-rate))")
     return Result("C4", "Speed and acceleration", worst(*st), summ, det, pts)
 
 
