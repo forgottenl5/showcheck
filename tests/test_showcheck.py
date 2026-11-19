@@ -313,7 +313,7 @@ def test_c5_skips_pairs_below_min_nav_altitude(tmp_path):
     assert r.status == "PASS" and r.summary.startswith("6.00 m"), r.summary
     nav = next(d for d in r.details if d.startswith("minNavAltitude"))
     assert "file settings.validation.minNavAltitude" in nav and "below 2.5 m" in nav
-    # every frame until both pass 2.5 m (t ~ 9.2 s) is skipped, and nothing after it
+    # every frame until both pass 2.5 m (t ~ 9.2 s) is skipped, and nothing after it (no landingTime)
     frames = int(nav.split(" frames")[0].split(" in ")[-1].split(" of ")[0])
     assert 90 <= frames <= 95, nav
 
@@ -417,3 +417,32 @@ def test_trajectory_without_takeoff_time_is_zero(tmp_path):
     assert a.takeoff == 0.0 and a.t_start == 0.0 and a.t_end == 10.0
     assert np.allclose(a.at(np.array([5.0]))[0], [0, 0, 5])     # not shifted
     assert any("1 drone(s) have no takeoffTime; treated as 0" in n for n in show.notes)
+
+
+def test_near_pass_after_landing_time_is_not_reported(tmp_path):
+    """Skybrush: validate only up to min(end of trajectory, landingTime). Drone a's trajectory goes on past its
+    landingTime and passes 0.5 m from b; the firmware cuts that part for precision landing, so C5 must not report it."""
+    from showcheck.checks import c5_spacing, prepare
+    a = [[0, [0, 0, 0], []], [5, [0, 0, 10], []], [20, [-2, 0, 10], []], [25, [3.0, 0, 10], []]]
+    b = [[0, [3.5, 0, 0], []], [5, [3.5, 0, 10], []], [25, [3.5, 0, 10], []]]
+    drones = [{"name": "a", "home": [0, 0, 0], "trajectory": _traj(a, takeoffTime=0, landingTime=20)},
+              {"name": "b", "home": [3.5, 0, 0], "trajectory": _traj(b, takeoffTime=0)}]
+    show = read_skyc(_skyc(tmp_path, drones))
+    da, db = show.drones
+    assert da.window_end == 20.0 and db.window_end == 25.0
+    assert any("check window (C2-C5)" in n and "1 drone(s) end before" in n and "5.00 s" in n for n in show.notes)
+    assert any("1 drone(s) have no landingTime" in n for n in show.notes)
+    ven = load_venue(synth.venue_dict())                    # min_spacing_m 2.0
+    r = c5_spacing(show, ven, prepare(show, ven))
+    assert r.status == "PASS" and r.summary.startswith("3.50 m"), r.summary   # not the 0.50 m at 25 s
+    da.t_check_end = None                                   # without the window the near-pass is found
+    r = c5_spacing(show, ven, prepare(show, ven))
+    assert r.status == "FAIL" and r.summary.startswith("0.50 m"), r.summary
+
+
+def test_landing_time_after_trajectory_end_is_capped(tmp_path):
+    pts = [[0, [0, 0, 0], []], [5, [0, 0, 10], []]]
+    show = read_skyc(_skyc(tmp_path, [{"name": "a", "trajectory": _traj(pts, takeoffTime=0, landingTime=99)},
+                                      {"name": "b", "trajectory": _traj([[0, [5, 0, 0], []], [5, [5, 0, 10], []]])}]))
+    assert show.drones[0].window_end == 5.0
+

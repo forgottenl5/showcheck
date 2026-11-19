@@ -54,7 +54,11 @@ def prepare(show, venue):
     homes = local_to_venue(np.array([d.home for d in show.drones]), origin, heading, show.handed, venue["origin"])
     fence = None if show.fence is None else local_to_venue(show.fence, origin, heading, show.handed, venue["origin"])
     dz = float(geo_offset(origin, venue["origin"])[2])        # venue-frame z = show Z + dz
-    return {"t": t, "P": Pv, "homes": homes, "fence": fence, "origin": origin, "heading": heading, "dz": dz}
+    # check window (C2-C5): each drone up to min(end of trajectory, landingTime), see readers.read_skyc
+    te = np.array([getattr(d, "window_end", d.t_end) for d in show.drones])
+    valid = t[None, :] <= te[:, None] + 1e-9                  # (D, T)
+    return {"t": t, "P": Pv, "homes": homes, "fence": fence, "origin": origin, "heading": heading, "dz": dz,
+            "valid": valid, "t_end": te}
 
 
 def pick_limit(show, venue, venue_key, file_key, file_name):
@@ -142,6 +146,7 @@ def c2_crowd(show, venue, ctx):
     for c in venue["crowd"]:
         d = edge_dist(flat, c["poly"])
         d[inside(flat, c["poly"])] = 0.0
+        d[~ctx["valid"].reshape(-1)] = np.inf
         k = int(np.argmin(d)); di, ki = divmod(k, P.shape[1])
         ok = d[k] >= c["buffer"]
         st.append(PASS if ok else FAIL)
@@ -171,6 +176,7 @@ def c3_fence(show, venue, ctx):
     flat = P[:, :, :2].reshape(-1, 2)
     margin = edge_dist(flat, vf)
     margin[~inside(flat, vf)] *= -1
+    margin[~ctx["valid"].reshape(-1)] = np.inf
     k = int(np.argmin(margin)); di, ki = divmod(k, P.shape[1])
     ok = margin[k] >= venue["fence_buffer"]
     st.append(PASS if ok else FAIL)
@@ -180,7 +186,7 @@ def c3_fence(show, venue, ctx):
     summ = (f"fence match {mvd:.1f} m, " if mvd is not None else "no file fence, ") + f"min margin {margin[k]:.1f} m"
     amax = venue["limits"].get("max_altitude_m")
     if amax is not None:
-        zi = np.unravel_index(np.argmax(P[:, :, 2]), P.shape[:2])
+        zi = np.unravel_index(np.argmax(np.where(ctx["valid"], P[:, :, 2], -np.inf)), P.shape[:2])
         za = float(P[zi[0], zi[1], 2])
         st.append(FAIL if za > amax else PASS)
         det.append(f"max altitude {za:.1f} m vs limit {amax:g} m - {_where(ctx, show, *zi)}")
@@ -223,19 +229,19 @@ def c4_dynamics(show, venue, ctx):
 
     # speed: derivative of the Bezier segments (.skyc); 10 Hz differences of the linear path (.vviz)
     if all(d.segments is not None for d in show.drones):
-        ex = [drone_speeds(d.segments) for d in show.drones]
+        ex = [drone_speeds(d.segments, te) for d, te in zip(show.drones, ctx["t_end"])]
         spd = {k: (np.array([e[k] for e in ex]), np.array([tidx(e["t" + k]) for e in ex]))
                for k in ("v", "vxy", "vup", "vdown")}
         det.append("speed from the derivative of the Bezier segments")
     else:
-        v = np.diff(P, axis=1) * RATE_HZ
+        v = np.diff(P, axis=1) * RATE_HZ * (ctx["valid"][:, 1:] & ctx["valid"][:, :-1])[..., None]
         mags = {"v": np.linalg.norm(v, axis=2), "vxy": np.linalg.norm(v[..., :2], axis=2),
                 "vup": np.maximum(v[..., 2], 0), "vdown": np.maximum(-v[..., 2], 0)}
         spd = {k: (m.max(1), m.argmax(1) + 1) for k, m in mags.items()}
         det.append("speed from 10 Hz differences of the linearly interpolated path")
 
     # acceleration: the path sampled at the controller rate, central differences (see dynamics.py)
-    ac = [acceleration_peaks(d.at, d.t_start, d.t_end, rate, float(t[0])) for d in show.drones]
+    ac = [acceleration_peaks(d.at, d.t_start, te, rate, float(t[0])) for d, te in zip(show.drones, ctx["t_end"])]
     acc = {k: (np.array([e[k] for e in ac]), np.array([tidx(e["t" + k]) for e in ac])) for k in ("a", "axy", "az")}
     det.append(f"acceleration from the path sampled at {rate:g} Hz (the firmware's show control rate), central "
                "differences for velocity and again for acceleration"
@@ -282,7 +288,7 @@ def c5_spacing(show, venue, ctx):
     nav, nav_src = pick_limit(show, venue, "min_nav_altitude_m", "min_nav_altitude_m", "minNavAltitude")
     if nav is None:
         nav, nav_src = DEFAULT_MIN_NAV_ALTITUDE_M, "the default (Skybrush SHOW_TAKEOFF_ALT; neither file nor venue sets it)"
-    air = (P[:, :, 2] - ctx["dz"]) >= nav                     # (D, T): show Z above the show origin
+    air = ((P[:, :, 2] - ctx["dz"]) >= nav) & ctx["valid"]    # (D, T): show Z above the show origin, in the window
     best = (np.inf, 0, 0, 0)
     step = max(1, int(4e6 // (D * D)))
     iu = np.triu_indices(D, 1)
@@ -298,7 +304,8 @@ def c5_spacing(show, venue, ctx):
     total, checked = T * (D * (D - 1) // 2), int((n_air * (n_air - 1) // 2).sum())
     nav_det = (f"minNavAltitude {nav:g} m from {nav_src}: skipped {total - checked:,} of {total:,} pair-samples "
                f"in {int((n_air < D).sum())} of {T} frames (10 Hz), because one or both drones were below {nav:g} m "
-               f"above the show origin (Skybrush does not check neighbour distances there)")
+               f"above the show origin (Skybrush does not check neighbour distances there) or past the end of "
+               f"their check window (landingTime)")
     d, k, a, b = best
     if not np.isfinite(d):
         return Result("C5", "Closest pair", WARN, f"no pair above minNavAltitude {nav:g} m: nothing checked",

@@ -28,6 +28,12 @@ class Drone:
     landing: Optional[float] = None
     segments: Optional[list] = None         # .skyc: [(t0, t1, control points (n, 3) incl. both ends)], show-local
     raw: Optional[dict] = None              # source objects for fingerprints: {"trajectory": ..., "lights": ..., ["pyro": ...]}
+    t_check_end: Optional[float] = None     # .skyc landingTime: end of the check window; None = t_end
+
+    @property
+    def window_end(self) -> float:
+        """C2-C5 check this drone only up to here: min(end of trajectory, landingTime)."""
+        return self.t_end if self.t_check_end is None else min(self.t_check_end, self.t_end)
 
 
 @dataclass

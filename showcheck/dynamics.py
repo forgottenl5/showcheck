@@ -66,13 +66,25 @@ def segment_z_range(t0, t1, cp):
     return max(float(vz[i]), 0.0), t0 + u[i] * dt, max(float(-vz[j]), 0.0), t0 + u[j] * dt
 
 
-def drone_speeds(segments):
-    """Max speed over a drone's segments: 3-D ("v"), horizontal ("vxy"), climb ("vup") and descent ("vdown"), with times."""
+def split_left(cp, u):
+    """Control points of the part u' in [0, u] of a Bezier (de Casteljau)."""
+    pts, left = np.asarray(cp, float), []
+    while len(pts):
+        left.append(pts[0])
+        pts = (1 - u) * pts[:-1] + u * pts[1:]
+    return np.array(left)
+
+
+def drone_speeds(segments, t_end=None):
+    """Max speed over a drone's segments up to t_end: 3-D ("v"), horizontal ("vxy"), climb ("vup") and descent
+    ("vdown"), with times."""
     best = {k: 0.0 for k in ("v", "tv", "vxy", "tvxy", "vup", "tvup", "vdown", "tvdown")}
     for t0, t1, cp in segments:
-        if t1 <= t0:
+        if t1 <= t0 or (t_end is not None and t0 >= t_end):
             continue
         cp = np.asarray(cp, float)
+        if t_end is not None and t1 > t_end:
+            cp, t1 = split_left(cp, (t_end - t0) / (t1 - t0)), t_end
         for key, (val, tt) in (("v", segment_max_speed(t0, t1, cp)), ("vxy", segment_max_speed(t0, t1, cp[:, :2]))):
             if val > best[key]:
                 best[key], best["t" + key] = val, tt

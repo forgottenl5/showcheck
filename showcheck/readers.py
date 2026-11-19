@@ -79,7 +79,8 @@ def read_skyc(path, limits=None) -> Show:
         loc = env.get("location")
         if loc and loc.get("origin"):
             o = loc["origin"]
-            if all(isinstance(v, int) for v in o[:2]):   # integers: deg x 1e7, altitude in mm [confirmed by real export]
+            # [DOC: skyc/coordinates.html] integers [lat 1e-7 deg, lon 1e-7 deg, optional AMSL mm] [confirmed by real export]
+            if all(isinstance(v, int) for v in o[:2]):
                 origin = (o[0] / 1e7, o[1] / 1e7, (o[2] / 1e3) if len(o) > 2 and o[2] is not None else 0.0)
                 if len(o) < 3 or o[2] is None:
                     notes.append("origin has no altitude in the file; 0 m assumed (Skybrush Studio exports omit it).")
@@ -88,6 +89,7 @@ def read_skyc(path, limits=None) -> Show:
                 notes.append("environment.location.origin looked like plain degrees, not deg x 1e7; read as degrees.")
             heading = float(loc.get("orientation", 0.0))
         cs = spec.get("coordinateSystem") or settings.get("coordinateSystem")
+        # Skybrush server/Live wire format, not found in real .skyc files (per Skybrush, 19 Nov 2026)
         if origin is None and isinstance(cs, dict) and cs.get("origin"):
             lon, lat = cs["origin"][:2]                # server-side order is (longitude, latitude)
             origin, heading = (float(lat), float(lon), 0.0), float(cs.get("orientation", 0.0))
@@ -120,7 +122,7 @@ def read_skyc(path, limits=None) -> Show:
                                  ("maxAccelerationZ", "max_accel_z"), ("minNavAltitude", "min_nav_altitude_m")]
                   if val.get(k1) is not None}
 
-        drones, shifted, no_takeoff, total_points = [], False, 0, 0
+        drones, shifted, no_takeoff, total_points, no_landing = [], False, 0, 0, 0
         swarm = spec["swarm"]["drones"]
         need(isinstance(swarm, list), "swarm.drones is not a list")
         check_count(len(swarm), "max_drones", "drones in the show", lim)
@@ -139,12 +141,28 @@ def read_skyc(path, limits=None) -> Show:
             shifted |= shift != 0
             at, ts, te, segs = _trajectory_fn(traj["points"], shift)
             home = np.array(s["home"], float) if s.get("home") else at(np.array([ts]))[0]
+            # Check window: up to min(end of trajectory, landingTime). Skybrush (T. Nepusz, #dev, 19 Nov 2026): the
+            # firmware cuts the trajectory near the end for precision landing, so validate only up to the landing.
+            # landingTime is "the landing time of the drone in seconds since the start of the show" [DOC: schema];
+            # settings.landAt is only a position [DOC: schema], so it is not used for the window (drones hover at or
+            # fly through that point long before landing: official hover/loiter/sync shows).
+            landing = traj.get("landingTime")
+            if landing is None:
+                no_landing += 1
+            else:
+                landing = finite(landing, f"drone {i}: landingTime")
             raw = {"trajectory": traj, "lights": _resolve(z, s.get("lights"))}
             check_count(_light_length(raw["lights"]), "max_light_length", f"drone {i}: light program bytes", lim)
             if s.get("pyro") is not None:
                 raw["pyro"] = _resolve(z, s["pyro"])
             drones.append(Drone(str(s.get("name", i)), home, at, ts, te,
-                                shift, traj.get("landingTime"), segs, raw))
+                                shift, landing, segs, raw, landing))
+        cut = [d.t_end - d.window_end for d in drones]
+        notes.append(f"check window (C2-C5): each drone up to min(end of trajectory, landingTime), as Skybrush "
+                     f"advised (19 Nov 2026); {sum(c > 1e-9 for c in cut)} drone(s) end before their trajectory end, by "
+                     f"up to {max(cut, default=0):.2f} s.")
+        if no_landing:
+            notes.append(f"{no_landing} drone(s) have no landingTime; checked to the end of the trajectory.")
         if no_takeoff:
             notes.append(f"{no_takeoff} drone(s) have no takeoffTime; treated as 0 (Skybrush schema default).")
         if shifted:

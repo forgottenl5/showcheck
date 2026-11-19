@@ -22,6 +22,8 @@ report with a top-view picture, and a fingerprint manifest.
 | **C5 Spacing** | The closest approach between any two drones is at least the venue's minimum spacing (FAIL), and at least the file's `minDistance` (WARN only). Pairs where either drone is below `minNavAltitude` are skipped, as Skybrush does. The value comes from the venue, else the file, else 2.5 m (Skybrush's default takeoff altitude). The report says which was used and how many pair-samples were skipped. |
 | **C6 Fingerprint** | One SHA-256 per drone (trajectory and lights) plus the placement, to compare with what each drone actually received. |
 
+C2-C5 check each drone only up to min(end of its trajectory, its `landingTime`), because the Skybrush firmware cuts the trajectory near the end for precision landing (advice from Skybrush, 19 Nov 2026). See FORMAT_NOTES.md for the rule and why `landAt` (a position only) is not used.
+
 ## Quick start
 
 Needs Python 3.10 or later.
