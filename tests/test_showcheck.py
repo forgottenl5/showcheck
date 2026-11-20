@@ -42,9 +42,21 @@ def test_heading_off_7deg(tmp_path):
 
 
 def test_stale_geofence(tmp_path):
+    # the file fence is informational only (Skybrush schema), so a mismatch with the venue fence WARNs, never FAILs
     v = verdicts(tmp_path, "stale_fence")
-    assert v["C3"].status == "FAIL"
+    assert v["C3"].status == "WARN"
+    assert any("informational only" in d for d in v["C3"].details)
     assert all(v[k].status == "PASS" for k in ("C1", "C2", "C4", "C5"))
+
+
+def test_drones_outside_venue_fence_fail(tmp_path):
+    # drones vs the venue fence still FAILs: shrink the venue fence so the show crosses it
+    path = synth.write_skyc(str(tmp_path / "clean.skyc"), "clean")
+    vd = synth.venue_dict()
+    vd["geofence"]["polygon"] = [[x * 0.4, y * 0.4] for x, y in vd["geofence"]["polygon"]]
+    res, _ = run_checks(read_skyc(path), load_venue(vd))
+    c3 = next(r for r in res if r.id == "C3")
+    assert c3.status == "FAIL" and any(d.startswith("closest approach to venue fence -") for d in c3.details), c3.details
 
 
 def test_speed_spike(tmp_path):

@@ -30,7 +30,7 @@ The venue file is ShowCheck's own format. It describes the real site, independen
 | `tolerances.origin_m` | no (2.0) | Allowed horizontal origin difference | C1 |
 | `tolerances.heading_deg` | no (2.0) | Allowed heading difference | C1 |
 | `tolerances.pad_m` | no (1.0) | Each drone's home must be within this distance of some pad | C1 |
-| `tolerances.fence_match_m` | no (1.0) | Allowed max vertex difference between the file fence and the venue fence | C3 |
+| `tolerances.fence_match_m` | no (1.0) | Allowed max vertex difference between the file fence and the venue fence (WARN only: the file fence is informational, per Skybrush's schema) | C3 |
 | `pads` | no | Launch pads `[east, north]`. If empty, the home check is skipped (WARN). | C1 |
 | `pad_assignment` | no | `{"<drone id>": <index into pads>}`. C1 checks each drone against ITS pad. Without it, drones are matched to pads one-to-one (minimum total distance, not nearest pad) and C1 is at least WARN, because a swapped pair cannot be detected that way. | C1 |
 | `crowd_areas[]` | no | `polygon`: at least 3 `[east, north]` points; `buffer_m`: minimum horizontal distance from any drone to the polygon at any time | C2 |

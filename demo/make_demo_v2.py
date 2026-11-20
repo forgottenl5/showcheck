@@ -3,7 +3,7 @@
 """Demo short v2 (1080x1920, 20 s), written for viewers with the sound off and no drone-show background.
 
 Story: the synthetic 100-drone show is planned 60 m from the crowd; one wrong number moves it 18 m closer;
-it is then 42 m from people with a 50 m limit; ShowCheck flags three problems.
+it is then 42 m from people with a 50 m limit; ShowCheck flags two failures and one warning.
 
 Every number on screen is parsed from ShowCheck's own CLI output (the same lines as demo_source_clean.txt and
 demo_source_shift18.txt; the script stops if they differ). Drone positions come from the same check runs (venue frame).
@@ -85,7 +85,9 @@ def numbers(clean, shift):
     n["moved_m"] = whole(m.group(1))
     m = re.fullmatch(r"(.+): ([\d.]+) m \(buffer ([\d.]+)\)", shift["C2"][2]); assert shift["C2"][1] == "FAIL"
     n["close_m"] = whole(m.group(2)); assert whole(m.group(3)) == n["limit_m"]
-    m = re.match(r"fence match ([\d.]+) m", shift["C3"][2]); assert shift["C3"][1] == "FAIL" and float(m.group(1)) > 0
+    # the file fence is informational only (Skybrush schema), so a fence mismatch is a WARN, not a FAIL
+    m = re.match(r"fence match ([\d.]+) m", shift["C3"][2]); assert shift["C3"][1] == "WARN" and float(m.group(1)) > 0
+    n["status"] = [shift[c][1] for c in ("C1", "C2", "C3")]
     return n
 
 
@@ -201,12 +203,14 @@ def main():
     ]
     vrows = []
     y = 250
-    for v in verdicts:
-        x1, = ax.plot([], [], "-", color=RED, lw=9, solid_capstyle="round")
-        x2, = ax.plot([], [], "-", color=RED, lw=9, solid_capstyle="round")
+    for v, stv in zip(verdicts, num["status"]):
+        col = RED if stv == "FAIL" else YEL
+        x1, = ax.plot([], [], "-", lw=9, solid_capstyle="round")
+        x2, = ax.plot([], [], "-", lw=9, solid_capstyle="round")
         tx = ax.text(165, y, v, color=FG, fontsize=56 * PT, weight="bold", va="top",
                      linespacing=1.15)
-        vrows.append((y, x1, x2, tx)); y += 180
+        x1.set_color(col); x2.set_color(col); x2.set_marker("o"); x2.set_markersize(12)
+        vrows.append((y, x1, x2, tx, stv)); y += 180
     end_txt = [
         ax.text(CX, 760, "ShowCheck -\ncheck the show file\nbefore launch", color=FG, fontsize=76 * PT, weight="bold",
                 ha="center", va="center", linespacing=1.25),
@@ -247,12 +251,18 @@ def main():
         in_v = 12 <= ts < END
         small.set_text("ShowCheck flags it before launch." if in_v else ""); small.set_visible(in_v)
         panel.set_visible(in_v)
-        for (yy, x1, x2, tx), tv in zip(vrows, VERDICT_T):
+        for (yy, x1, x2, tx, stv), tv in zip(vrows, VERDICT_T):
             on = in_v and ts >= tv
             tx.set_visible(on)
             xc, yc, r = 100, yy + 34, 26
-            x1.set_data(([xc - r, xc + r], [yc - r, yc + r]) if on else ([], []))
-            x2.set_data(([xc - r, xc + r], [yc + r, yc - r]) if on else ([], []))
+            if stv == "FAIL":                                     # red cross
+                x2.set_marker("")
+                x1.set_data(([xc - r, xc + r], [yc - r, yc + r]) if on else ([], []))
+                x2.set_data(([xc - r, xc + r], [yc + r, yc - r]) if on else ([], []))
+            else:                                                 # yellow exclamation mark (WARN)
+                x2.set_linestyle("none")
+                x1.set_data(([xc, xc], [yc - r - 4, yc + r - 18]) if on else ([], []))
+                x2.set_data(([xc], [yc + r + 2]) if on else ([], []))
 
     total = int(DUR * FPS)
     silent = os.path.join(OUT, "showcheck_demo_silent.mp4")

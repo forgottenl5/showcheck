@@ -158,6 +158,10 @@ def c2_crowd(show, venue, ctx):
 
 
 # ------------------------------------------------------------ C3
+# Skybrush .skyc schema (docs.skybrush.io/public/skybrush-file-formats/skyc/schema.html), settings.geofence
+FILE_FENCE_NOTE = ('Skybrush schema: the file geofence is "informational only: Skybrush Live does not use it and defines '
+                   'its own geofence instead"; drones vs the venue fence is what can FAIL')
+
 def c3_fence(show, venue, ctx):
     det, pts, st = [], [], []
     vf = venue["fence"]
@@ -170,8 +174,9 @@ def c3_fence(show, venue, ctx):
         ff = ctx["fence"]
         dm = np.linalg.norm(ff[:, None] - vf[None], axis=2)
         mvd = float(max(dm.min(1).max(), dm.min(0).max()))
-        st.append(FAIL if mvd > venue["tol"]["fence_match_m"] else PASS)
-        det.append(f"file fence vs venue fence: max vertex difference {mvd:.2f} m ({len(ff)} vs {len(vf)} vertices); limit {venue['tol']['fence_match_m']} m")
+        st.append(WARN if mvd > venue["tol"]["fence_match_m"] else PASS)
+        det.append(f"file fence vs venue fence: max vertex difference {mvd:.2f} m ({len(ff)} vs {len(vf)} vertices); limit {venue['tol']['fence_match_m']} m"
+                   + (" - WARN only: " + FILE_FENCE_NOTE if mvd > venue["tol"]["fence_match_m"] else ""))
     P = ctx["P"]
     flat = P[:, :, :2].reshape(-1, 2)
     margin = edge_dist(flat, vf)

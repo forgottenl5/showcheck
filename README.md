@@ -17,7 +17,7 @@ report with a top-view picture, and a fingerprint manifest.
 |---|---|
 | **C1 Placement** | The show's origin and heading match the venue plan, and every drone's home is on its assigned pad. |
 | **C2 Crowd distance** | No drone comes closer to a crowd area than that area's buffer. |
-| **C3 Geofence** | The file's fence matches the venue fence, every drone stays inside it with the buffer margin, and maximum altitude is within the limit. |
+| **C3 Geofence** | Every drone stays inside the venue fence with the buffer margin, and maximum altitude is within the limit (FAIL). The file's own fence is compared with the venue fence, but a mismatch can only WARN: Skybrush's schema says the file geofence is "informational only: Skybrush Live does not use it and defines its own geofence instead". |
 | **C4 Speed and acceleration** | Max speed and acceleration are within the venue limits. Speed comes from the derivative of the `.skyc` curves. Acceleration (method and rate are printed in the C4 line): 10 Hz sampled positions by default (`--ctrl-rate` 1-50, the drone's show control rate), central difference of central-difference velocity; values depend on the rate. This is used because the firmware follows the show at that rate and tiny segments in real exports would otherwise give meaningless spikes. Skybrush Studio estimates velocity and acceleration by backward differences at the scene frame rate (skybrush-io/studio-blender, src/modules/sbstudio/plugin/tasks/safety_check.py, commit 0a99e22), so its acceleration values can be higher than ShowCheck's 10 Hz figures on the same show. The file's own `settings.validation` levels (`maxVelocityXY/Z/ZUp`, `maxAccelerationXY/Z`) are designer warnings: they can WARN, never FAIL. |
 | **C5 Spacing** | The closest approach between any two drones is at least the venue's minimum spacing (FAIL), and at least the file's `minDistance` (WARN only). Pairs where either drone is below `minNavAltitude` are skipped, as Skybrush does. The value comes from the venue, else the file, else 2.5 m (Skybrush's default takeoff altitude). The report says which was used and how many pair-samples were skipped. |
 | **C6 Fingerprint** | One SHA-256 per drone (trajectory and lights) plus the placement, to compare with what each drone actually received. |
@@ -54,15 +54,20 @@ about the file formats, and how sure we are of each point, is in `FORMAT_NOTES.m
 ## What is verified, and what is not
 
 **Verified:** the `.skyc` axes, heading and timing conventions were confirmed against real Skybrush Studio exports.
-ShowCheck's positions match Blender's own positions to within about 10 cm. They also match Skybrush's
+ShowCheck's positions match Blender's own positions to within about 10 cm (max 0.067 m and 0.095 m on two test
+exports; see "Ground-truth status" in `FORMAT_NOTES.md`, rerun by `tests/test_showcheck.py::test_real_export_known4`
+when you supply the exports). They also match Skybrush's
 [published `.skyc` documentation](https://docs.skybrush.io/public/skybrush-file-formats/skyc/index.html).
 
-The geofence layout (`polygons[{isInclusion, points}]` plus `action`) now comes from Skybrush's published schema. The
-units and frame of the fence points are still unconfirmed; we have asked Skybrush. Skybrush Studio exports carry no
+The geofence layout comes from Skybrush's [published schema](https://docs.skybrush.io/public/skybrush-file-formats/skyc/schema.html): `polygons[{isInclusion, points}]` plus
+`action`, with each point given as X-Y-Z in metres in the show's relative coordinate system. The schema also says the
+file geofence is "informational only: Skybrush Live does not use it and defines its own geofence instead", so ShowCheck treats
+a mismatch with the venue fence as a WARN; drones crossing the venue fence is a FAIL. Skybrush Studio exports carry no
 fence, so with those files C3 checks against the venue fence only.
 
 **Not verified:**
-- Any real show or real fleet. The examples are synthetic.
+- Tested privately on Skybrush's official demo and test shows (only the results are reported here; those files are
+  not shared). The examples in this repository are synthetic. ShowCheck has not been tested on a real fleet.
 - `.vviz` is visualization-grade only: no heading, no fence, and positions between samples are interpolated
   linearly.
 

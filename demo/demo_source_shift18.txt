@@ -1,6 +1,6 @@
 C1    FAIL     origin 18.00 m, heading +0.00 deg, 100 drone(s) off-pad
 C2    FAIL     south crowd: 42.0 m (buffer 50)
-C3    FAIL     fence match 18.0 m, min margin 22.0 m, max alt 30.0 m
+C3    WARN     fence match 18.0 m, min margin 22.0 m, max alt 30.0 m
 C4    PASS     max speed 4.20 m/s, max accel 1.78 m/s2 (accel: 10 Hz sampled positions, central difference of central-difference velocity; values depend on rate (--ctrl-rate))
 C5    PASS     2.51 m (drone_013/drone_014 @ 28.9 s)
 C6    PASS     100 drones fingerprinted, show 7c0461fc05b7b3e3...

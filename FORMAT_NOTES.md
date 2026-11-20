@@ -83,7 +83,7 @@ field names, types and required/optional confirmed by the published JSON schema 
 - `media.audio`: MP3, embedded or as a separate asset, with `startTime`.
 - `settings`:
   - `cues`: `{version, items:[{name, time}]}`.
-  - `geofence`: `{version, polygons: [{isInclusion, points}], action}` [DOC]. `version`, `polygons`, and each polygon's `isInclusion` and `points` are required; `action` is optional [DOC]. The `action` values (report, land, return, smartLand, smartReturn, stop, shutDown) and points as `[x, y, z]` come from code only [CODE].
+  - `geofence`: `{version, polygons: [{isInclusion, points}], action}` [DOC]. `version`, `polygons`, and each polygon's `isInclusion` and `points` are required; `action` is optional [DOC]. Each point is X-Y-Z in metres in the show's relative coordinate system, and `action` is one of report, land, return, smartLand, smartReturn, stop, shutDown [DOC]. The file geofence is "informational only: Skybrush Live does not use it and defines its own geofence instead" [DOC: schema].
   - `validation` [DOC], all optional numbers in SI units:
     - `maxAccelerationXY`, `maxAccelerationZ` (m/s²);
     - `maxVelocityXY`, `maxVelocityZ`, `maxVelocityZUp` (m/s);
@@ -151,7 +151,7 @@ field names, types and required/optional confirmed by the published JSON schema 
 | **Heading / orientation** | **No field.** Rotation is set in the importing tool [DOC Finale]. ShowCheck must ask the user for it (or assume Finale's "north into screen" default) and say so. | `environment.location.orientation`: X+ axis in degrees from North towards East [CODE]. Check: present and matches the venue plan. |
 | **Home / launch positions** | `homeX/Y/Z` [DOC]. Check spacing, duplicates, a flat grid. | `settings.home` per drone [CODE]. Same checks; also `landAt`. |
 | **Closest approach** | Rebuild positions (home + cumulative deltas, `dt` rule) [DOC]. Path *between* samples is unknown; I used linear interpolation [GUESS]. | Evaluate the Bézier segments at 10 Hz [CODE]. Compare against `settings.validation.minDistance` if set (warning level: WARN only). |
-| **Geofence** | **No field.** Can only check against a user-supplied polygon, or report the bounding box/hull. | `settings.geofence.polygons[{isInclusion, points}]` + `action` [DOC]. Check every trajectory stays inside the inclusion polygons and outside the exclusion ones. Point dimensions, units and frame are not documented; probably show-frame metres [GUESS]. |
+| **Geofence** | **No field.** Can only check against a user-supplied polygon, or report the bounding box/hull. | `settings.geofence.polygons[{isInclusion, points}]` + `action` [DOC]. Points are X-Y-Z in metres in the show's relative coordinate system [DOC: schema]. The file fence is informational only; Skybrush Live defines its own [DOC: schema]. ShowCheck therefore FAILs on drones vs the venue fence and only WARNs when the file fence differs from the venue fence. |
 | **Speed** | Finite differences on the reconstructed track. | Bézier first derivative [CODE]. Compare with `maxVelocityXY`, `maxVelocityZ`, `maxVelocityZUp` (warning levels: WARN only). |
 | **Acceleration** | Only rough: linear interpolation between samples creates corner spikes (artefacts). Needs smoothing or knowledge of how Verge interpolates [GUESS]. | **Not** the Béziers' second derivative: real exports have many tiny segments (one official demo show: 4410 of 4838 segments have no control points, the shortest is 0.022 s), and per-segment B''/dt² gave 371.9 m/s². The firmware follows the show with position + velocity targets at `SHOW_CTRL_RATE` (10 Hz default, 1-50) with feed-forward [CODE: firmware], and Studio estimates velocity and acceleration from positions at nearby frames [CODE: Studio]. ShowCheck therefore samples the path at the control rate and uses central differences twice. Venue `max_accel_mps2` can FAIL; `validation.maxAccelerationXY` / `maxAccelerationZ` [DOC] can only WARN. |
 | **Altitude** | Max/min Y [DOC: Y up]. | Z max vs `validation.maxAltitude` (m AGL [DOC]); `amslReference` if present. |
@@ -169,7 +169,7 @@ field names, types and required/optional confirmed by the published JSON schema 
 3. **VVIZ heading:** there is no field linking local axes to North. Placement in the world needs outside information.
 4. **VVIZ interpolation between samples** is undocumented (linear? spline?). Closeness and acceleration between samples are estimates.
 5. **The VVIZ `frames` meaning** (time delta vs hold) is contradictory between Verge and Finale.
-6. **Units** of `globalReferenceFrame.alt` and `homeX/Y/Z` (VVIZ) are not stated anywhere; metres are assumed [GUESS]. `.skyc` uses SI units (s, m, deg) [DOC], but the geofence point units are not given (see below).
+6. **Units** of `globalReferenceFrame.alt` and `homeX/Y/Z` (VVIZ) are not stated anywhere; metres are assumed [GUESS]. `.skyc` uses SI units (s, m, deg) [DOC], and the geofence points are metres in the show's relative coordinate system [DOC: schema].
 7. **Third-party formats** (Depence `.ddsf`, DSS, HighGreat, EVSKY…) have no public specs.
 8. **Licensing for ShowCheck:**
     - All Skybrush repos are GPL-3.0, except `libskybrush` (NOASSERTION on GitHub) and `skybrush-log-analyzer-cli` (MIT).
@@ -179,7 +179,6 @@ field names, types and required/optional confirmed by the published JSON schema 
 
 The published `.skyc` docs leave these open:
 - **Origin:** the encoding (code and real export show integers: lat/lon × 10⁷, altitude in mm), the altitude unit, and whether the altitude is AMSL or AGL. The docs say it can be either and give no way to tell.
-- **Geofence:** the dimensions of each point (2-D or 3-D), their frame (show-local or geodetic) and units, and the allowed `action` values. We have asked Skybrush.
 - **`maxAltitude`:** documented as metres above ground level. ShowCheck compares altitude with Z above the show origin, which is the same only when the origin is at ground level.
 - **`home` / `landAt`:** typed as arrays of "relative coordinates" from a separate schema that is not shown.
 - **`rthPlan.entries`:** required, but the entry fields are not documented.
@@ -236,7 +235,7 @@ Confirmed by real export:
 - **Origin:** `environment.location.origin` = `[round(lat·1e7), round(lon·1e7)]`, JSON integers, with NO altitude element (0.0100 deg → 100000). [confirmed by real export]
 - **Time:** point times are relative to `takeoffTime`; show time = t + `takeoffTime`. In `known4_delayed`, `takeoffTime` = 5.0 and points start at 0. Reading them as t + 5 reproduces Blender to ≤ 0.095 m; reading them without the shift is off by 16.3 m. `landingTime` is absolute (30.0 = 5 + last t 25.0). Before `takeoffTime` the drone sits at `home`. [confirmed by real export]
 - **Curves:** the server re-fits the sampled motion (default 4 fps) as cubic Bézier segments `[t, [x,y,z], [cp1, cp2]]` or straight segments `[t, p, []]`. Evaluating with u linear in time matches Blender to ≤ 0.067 m (`known4`) and ≤ 0.095 m (`known4_delayed`). The fit leaves velocity jumps of up to 0.30 m/s where segments meet. [confirmed by real export]
-- **Geofence:** Skybrush Studio has no geofence setting, and the export has no `settings.geofence`. A fence in a `.skyc` must come from another tool (e.g. Skybrush Live). The polygon layout (`polygons[{isInclusion, points}]`) now comes from the published schema [DOC]; point units and frame are still unconfirmed. [confirmed absent in Studio exports]
+- **Geofence:** Skybrush Studio has no geofence setting, and the export has no `settings.geofence`. A fence in a `.skyc` must come from another tool (e.g. Skybrush Live). The polygon layout (`polygons[{isInclusion, points}]`), point units and frame (X-Y-Z metres in the show's relative coordinate system) come from the published schema, which also says the file geofence is informational only and Skybrush Live defines its own [DOC: https://docs.skybrush.io/public/skybrush-file-formats/skyc/schema.html]. [confirmed absent in Studio exports]
 - **Other fields seen:** `settings.validation` holds maxAccelerationXY/Z, maxAltitude, maxVelocityXY/Z, maxYawRate, minDistance and minNavAltitude. All but maxYawRate are in the published schema [DOC]. ShowCheck checks maxVelocityXY/Z/ZUp and maxAccelerationXY/Z (C4) and minDistance (C5) as designer warning levels (WARN, never FAIL). That these validation limits are designer warning levels was confirmed by Skybrush (19 Nov 2026, #dev). It uses minNavAltitude (C5) with a venue value winning, and 2.5 m (firmware `SHOW_TAKEOFF_ALT` default) when neither sets it. `settings.cues` points to `cues.json`. `meta.segments.takeoff` = [0, 0] when there is no storyboard. `environment.type` = "outdoor".
 
 Reader changes made because of this:
